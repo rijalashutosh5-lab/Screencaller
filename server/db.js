@@ -1,15 +1,15 @@
-const Database = require('better-sqlite3');
+const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-const db = new Database(path.join(dataDir, 'app.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const rawDb = new DatabaseSync(path.join(dataDir, 'app.db'));
+rawDb.exec('PRAGMA journal_mode = WAL;');
+rawDb.exec('PRAGMA foreign_keys = ON;');
 
-db.exec(`
+rawDb.exec(`
 CREATE TABLE IF NOT EXISTS organizations (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -58,5 +58,21 @@ CREATE TABLE IF NOT EXISTS answers (
   audio_path TEXT NOT NULL
 );
 `);
+
+// Thin wrapper so the rest of the app can keep using the better-sqlite3-style
+// db.prepare(sql).get(...)/.all(...)/.run(...) calls with positional '?' params.
+const db = {
+  prepare(sql) {
+    const stmt = rawDb.prepare(sql);
+    return {
+      get: (...params) => stmt.get(...params),
+      all: (...params) => stmt.all(...params),
+      run: (...params) => stmt.run(...params)
+    };
+  },
+  exec(sql) {
+    return rawDb.exec(sql);
+  }
+};
 
 module.exports = db;

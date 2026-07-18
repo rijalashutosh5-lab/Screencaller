@@ -13,9 +13,9 @@ layer is designed to swap to S3/Postgres later without touching the app logic.
 - Consent is recorded server-side with a timestamp and IP, not just a UI checkbox
 
 ## Stack
-- Node.js + Express
-- SQLite (via `better-sqlite3`) — a single file database, zero setup, good enough
-  for real usage at small-to-mid volume
+- Node.js (>= 22.5) + Express
+- SQLite via Node's **built-in** `node:sqlite` module — no native compilation,
+  no Python/build tools required, works the same on Windows/Mac/Linux
 - Audio files stored on local disk under `/uploads`
 - JWT auth for recruiters; candidates need no account, just the form code
 
@@ -26,6 +26,10 @@ npm install
 cp .env.example .env      # then edit JWT_SECRET to a real random string
 npm start
 ```
+
+You need **Node 22.5 or newer** (check with `node -v`) — that's what ships
+`node:sqlite`. You'll see a one-line `ExperimentalWarning: SQLite is an
+experimental feature` on startup; that's expected and harmless, not an error.
 
 Open `http://localhost:3000`:
 - `/index.html` — recruiter sign in / create account
