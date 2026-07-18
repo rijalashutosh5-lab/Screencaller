@@ -37,6 +37,20 @@ let view = 'builder';
 let draft = { title:'', questions:[''] };
 let forms = [];
 let activeFormId = null;
+let lastPublished = null;
+
+function inviteLink(code){
+  return `${window.location.origin}/apply.html?code=${code}`;
+}
+async function copyLink(code){
+  const url = inviteLink(code);
+  try{
+    await navigator.clipboard.writeText(url);
+    toast('Link copied');
+  }catch(e){
+    toast(url); // clipboard blocked (e.g. non-HTTPS) — surface the URL itself instead
+  }
+}
 
 function toast(msg){
   const t = document.getElementById('toast');
@@ -79,12 +93,27 @@ async function renderBuilder(){
         <h3>${escapeHtml(f.title)}</h3>
         <span class="meta">${f.questionCount} question${f.questionCount===1?'':'s'} · ${f.responseCount} response${f.responseCount===1?'':'s'} · ${new Date(f.created_at).toLocaleDateString()}</span>
       </div>
-      <span class="code-pill">${f.code}</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span class="code-pill">${f.code}</span>
+        <button class="btn btn-ghost copylink" data-code="${f.code}">Copy link</button>
+        <a class="btn btn-ghost" href="${inviteLink(f.code)}" target="_blank" rel="noopener">Preview</a>
+      </div>
     </div>`).join('');
+
+  const banner = lastPublished ? `
+    <div class="card" style="border-color:var(--signal);">
+      <label>Share this with candidates</label>
+      <div style="display:flex;gap:10px;align-items:center;">
+        <input type="text" readonly value="${inviteLink(lastPublished.code)}" style="margin:0;" id="lastlink"/>
+        <button class="btn btn-primary" id="copylastlink">Copy link</button>
+      </div>
+    </div>` : '';
 
   stage.innerHTML = `
     <h1 class="page-title">Build a screening form</h1>
-    <p class="subtitle">Write the questions once, share a code, get back recorded answers instead of booking a call.</p>
+    <p class="subtitle">Write the questions once, share a link, get back recorded answers instead of booking a call.</p>
+
+    ${banner}
 
     <div class="card">
       <label>Form title</label>
@@ -102,7 +131,7 @@ async function renderBuilder(){
 
     <h1 class="page-title" style="font-size:20px;margin-top:36px;">Your forms</h1>
     <div class="card" style="padding:6px 22px;">
-      ${formListRows || '<div class="empty">Published forms will appear here with a shareable code.</div>'}
+      ${formListRows || '<div class="empty">Published forms will appear here with a shareable link.</div>'}
     </div>
   `;
 
@@ -119,6 +148,14 @@ async function renderBuilder(){
       renderBuilder();
     };
   });
+  document.querySelectorAll('.copylink').forEach(btn=>{
+    btn.onclick = () => copyLink(btn.dataset.code);
+  });
+  const copyLastBtn = document.getElementById('copylastlink');
+  if(copyLastBtn) copyLastBtn.onclick = () => copyLink(lastPublished.code);
+  const lastLinkInput = document.getElementById('lastlink');
+  if(lastLinkInput) lastLinkInput.onclick = () => lastLinkInput.select();
+
   document.getElementById('saveform').onclick = async () => {
     const title = draft.title.trim();
     const questions = draft.questions.map(q=>q.trim()).filter(Boolean);
@@ -127,8 +164,9 @@ async function renderBuilder(){
     try{
       const res = await api('/forms', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title, questions}) });
       draft = { title:'', questions:[''] };
-      toast('Form published — code ' + res.code);
+      lastPublished = { code: res.code, title };
       renderBuilder();
+      copyLink(res.code);
     }catch(e){ toast(e.message); }
   };
 }
@@ -165,7 +203,10 @@ async function renderResponses(){
     ${forms.length ? `
       <div class="card">
         <label>Form</label>
-        <select id="formsel">${formOptions}</select>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <select id="formsel" style="flex:1;">${formOptions}</select>
+          <button class="btn btn-ghost" id="copyactive">Copy link</button>
+        </div>
       </div>
       <div class="card">${rows || '<div class="empty">No submissions yet for this form.</div>'}</div>
     ` : `<div class="empty">Publish a form first to see responses here.</div>`}
@@ -175,6 +216,13 @@ async function renderResponses(){
   if(sel){
     sel.value = activeFormId;
     sel.onchange = e => { activeFormId = e.target.value; renderResponses(); };
+  }
+  const copyActiveBtn = document.getElementById('copyactive');
+  if(copyActiveBtn){
+    copyActiveBtn.onclick = () => {
+      const active = forms.find(f=>f.id===activeFormId);
+      if(active) copyLink(active.code);
+    };
   }
   document.querySelectorAll('.resp-head').forEach(h=>{
     h.onclick = () => document.getElementById('ans-'+h.dataset.rid).classList.toggle('open');
