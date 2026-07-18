@@ -1,0 +1,235 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Signal Screen — Answer a screening form</title>
+<link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><div class="mark"></div><span>SIGNAL SCREEN</span></div>
+  </div>
+  <div class="stage" id="stage"></div>
+  <div class="toast" id="toast"></div>
+</div>
+
+<script>
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2000);
+}
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+const stage = document.getElementById('stage');
+let state = { form:null, name:'', answers:{}, blobs:{}, idx:0, consentedAt:null };
+
+function renderCodeEntry(prefill){
+  stage.innerHTML = `
+    <h1 class="page-title">Answer a screening form</h1>
+    <p class="subtitle">Enter the code your recruiter shared with you.</p>
+    <div class="card">
+      <label>Form code</label>
+      <div class="code-entry">
+        <input type="text" id="codein" maxlength="8" value="${escapeHtml(prefill||'')}" placeholder="ABC123"/>
+        <button class="btn btn-primary" id="go">Open</button>
+      </div>
+      <div class="error" id="codeerr" style="display:none;"></div>
+    </div>
+  `;
+  document.getElementById('go').onclick = openCode;
+  document.getElementById('codein').onkeydown = e => { if(e.key==='Enter') openCode(); };
+}
+
+async function openCode(){
+  const code = document.getElementById('codein').value.trim().toUpperCase();
+  const err = document.getElementById('codeerr');
+  err.style.display='none';
+  try{
+    const r = await fetch('/api/invite/'+code);
+    const data = await r.json();
+    if(!r.ok){ err.textContent = data.error || 'No form found'; err.style.display=''; return; }
+    state.form = data; state.answers = {}; state.blobs = {}; state.idx = 0; state.consentedAt = null; state._code = code;
+    renderName();
+  }catch(e){ err.textContent = 'Could not reach the server'; err.style.display=''; }
+}
+
+function renderName(){
+  stage.innerHTML = `
+    <h1 class="page-title">${escapeHtml(state.form.title)}</h1>
+    <p class="subtitle">${state.form.questions.length} questions · answer each with a short voice recording</p>
+    <div class="card">
+      <label>Your name</label>
+      <input type="text" id="cname"/>
+      <div><button class="btn btn-primary" id="start">Start</button></div>
+    </div>
+  `;
+  document.getElementById('start').onclick = () => {
+    const name = document.getElementById('cname').value.trim();
+    if(!name) return toast('Enter your name to begin');
+    state.name = name;
+    renderConsent();
+  };
+}
+
+function renderConsent(){
+  stage.innerHTML = `
+    <h1 class="page-title">Before you record</h1>
+    <p class="subtitle">${escapeHtml(state.form.title)} — quick heads up before we start recording audio.</p>
+    <div class="card">
+      <ul class="consent-points">
+        <li>Your microphone only records while you're actively answering a question — nothing runs in the background.</li>
+        <li>Each recording is attached to your name and sent to the recruiter for this role.</li>
+        <li>You can re-record any answer before submitting, and nothing is sent until you hit Submit.</li>
+      </ul>
+      <div class="consent-box">
+        <input type="checkbox" id="consentcheck"/>
+        <p><strong>I consent</strong> to being recorded for this screening and to my recordings being shared with the recruiter and hiring team for this role.</p>
+      </div>
+      <div style="margin-top:18px;display:flex;gap:10px;">
+        <button class="btn btn-ghost" id="back">Back</button>
+        <button class="btn btn-primary" id="agree" disabled>Agree and start</button>
+      </div>
+    </div>
+  `;
+  const check = document.getElementById('consentcheck');
+  const agree = document.getElementById('agree');
+  check.onchange = () => agree.disabled = !check.checked;
+  document.getElementById('back').onclick = renderName;
+  agree.onclick = () => {
+    if(!check.checked) return;
+    state.consentedAt = Date.now();
+    state.idx = 0;
+    renderQuestion();
+  };
+}
+
+let mediaRecorder=null, mediaStream=null, chunks=[], recTimer=null, recSeconds=0, analyser=null, audioCtx=null, waveRAF=null;
+
+function renderQuestion(){
+  const q = state.form.questions[state.idx];
+  const existing = state.answers[q.id];
+  stage.innerHTML = `
+    <div class="card qcard">
+      <div class="eyebrow">QUESTION ${state.idx+1} OF ${state.form.questions.length}</div>
+      <p class="qtext">${escapeHtml(q.text)}</p>
+      <div class="recorder">
+        <button class="rec-btn idle" id="recbtn"></button>
+        <canvas class="wave" id="wave" width="600" height="44"></canvas>
+        <div class="timer" id="timer">0:00</div>
+      </div>
+      ${existing ? `<div class="answer-row"><audio controls src="${existing}"></audio><button class="btn btn-ghost" id="redo">Re-record</button></div>` : ''}
+      <div class="status-line"><div class="dot"></div><span id="statustext">${existing ? 'Answer captured' : 'Tap the red button to record your answer'}</span></div>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:space-between;">
+      <button class="btn btn-ghost" id="prevq" ${state.idx===0?'disabled':''}>Back</button>
+      ${state.idx===state.form.questions.length-1
+        ? `<button class="btn btn-primary" id="submit" ${existing?'':'disabled'}>Submit responses</button>`
+        : `<button class="btn btn-primary" id="nextq" ${existing?'':'disabled'}>Next question</button>`}
+    </div>
+  `;
+  document.getElementById('recbtn').onclick = toggleRecording;
+  const redo = document.getElementById('redo');
+  if(redo) redo.onclick = () => { delete state.answers[q.id]; delete state.blobs[q.id]; renderQuestion(); };
+  document.getElementById('prevq').onclick = () => { state.idx--; renderQuestion(); };
+  const nextBtn = document.getElementById('nextq');
+  if(nextBtn) nextBtn.onclick = () => { state.idx++; renderQuestion(); };
+  const submitBtn = document.getElementById('submit');
+  if(submitBtn) submitBtn.onclick = submit;
+}
+
+async function toggleRecording(){
+  const btn = document.getElementById('recbtn');
+  if(!mediaRecorder || mediaRecorder.state !== 'recording'){
+    try{ mediaStream = await navigator.mediaDevices.getUserMedia({audio:true}); }
+    catch(e){ toast('Microphone permission was denied'); return; }
+    chunks = [];
+    mediaRecorder = new MediaRecorder(mediaStream);
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(chunks, {type:'audio/webm'});
+      const q = state.form.questions[state.idx];
+      state.blobs[q.id] = blob;
+      state.answers[q.id] = URL.createObjectURL(blob);
+      mediaStream.getTracks().forEach(t=>t.stop());
+      cancelAnimationFrame(waveRAF);
+      renderQuestion();
+    };
+    mediaRecorder.start();
+    btn.classList.remove('idle'); btn.classList.add('recording');
+    document.getElementById('statustext').textContent = 'Recording... tap again to stop';
+    recSeconds = 0;
+    recTimer = setInterval(()=>{
+      recSeconds++;
+      document.getElementById('timer').textContent = Math.floor(recSeconds/60)+':'+String(recSeconds%60).padStart(2,'0');
+    },1000);
+    startWave();
+  } else {
+    mediaRecorder.stop();
+    clearInterval(recTimer);
+  }
+}
+
+async function startWave(){
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(mediaStream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  src.connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  const canvas = document.getElementById('wave');
+  const ctx = canvas.getContext('2d');
+  (function draw(){
+    waveRAF = requestAnimationFrame(draw);
+    analyser.getByteFrequencyData(data);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = '#4FD1A5';
+    const barW = canvas.width/data.length;
+    for(let i=0;i<data.length;i++){
+      const h = (data[i]/255)*canvas.height;
+      ctx.fillRect(i*barW, canvas.height-h, barW-1, h);
+    }
+  })();
+}
+
+async function submit(){
+  const fd = new FormData();
+  fd.append('candidateName', state.name);
+  fd.append('consent', 'true');
+  state.form.questions.forEach(q => {
+    if(state.blobs[q.id]) fd.append('answer_'+q.id, state.blobs[q.id], q.id+'.webm');
+  });
+  try{
+    const r = await fetch(`/api/invite/${state._code}/submit`, { method:'POST', body: fd });
+    const data = await r.json();
+    if(!r.ok) return toast(data.error || 'Submission failed');
+    stage.innerHTML = `
+      <div class="card" style="text-align:center;padding:50px 20px;">
+        <h1 class="page-title">Responses submitted</h1>
+        <p class="subtitle">Thanks, ${escapeHtml(state.name)} — the recruiter will review your recordings.</p>
+      </div>`;
+  }catch(e){ toast('Could not reach the server'); }
+}
+
+function currentCode(){ return state._code; }
+
+// Support /apply.html?code=ABC123
+const params = new URLSearchParams(window.location.search);
+const codeParam = params.get('code');
+state._code = codeParam ? codeParam.toUpperCase() : null;
+if(codeParam){
+  (async () => {
+    try{
+      const r = await fetch('/api/invite/'+codeParam.toUpperCase());
+      const data = await r.json();
+      if(r.ok){ state.form = data; renderName(); return; }
+    }catch(e){}
+    renderCodeEntry(codeParam);
+  })();
+} else {
+  renderCodeEntry();
+}
+</script>
+</body>
+</html>
