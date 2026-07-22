@@ -2,22 +2,20 @@
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>Signal Screen — Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SayForm — Dashboard</title>
 <link rel="stylesheet" href="/style.css"/>
 </head>
 <body>
 <div class="app">
   <div class="topbar">
-    <a class="brand" href="/dashboard.html"><div class="mark"></div><span>SIGNAL SCREEN</span></a>
-    <div style="display:flex;align-items:center;gap:16px;">
-      <div class="tabs">
-        <button class="tab active" data-view="builder">Build</button>
-        <button class="tab" data-view="responses">Responses</button>
-      </div>
-      <button class="signout" id="signout">Sign out</button>
-    </div>
+    <a class="brand" href="/dashboard.html"><div class="mark"></div><span class="wordmark"><span class="wm-say">Say</span><span class="wm-form">Form</span></span></a>
+    <button class="signout" id="signout">Sign out</button>
   </div>
-  <div class="stage" id="stage"></div>
+  <div class="workspace">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="stage" id="stage"></div>
+  </div>
   <div class="toast" id="toast"></div>
 </div>
 
@@ -31,33 +29,37 @@ document.getElementById('signout').onclick = () => {
   window.location.href = '/index.html';
 };
 
+const sidebar = document.getElementById('sidebar');
 const stage = document.getElementById('stage');
-const tabs = document.querySelectorAll('.tab');
-let view = 'builder';
+
+// --- state ---
+let projects = [];
+let activeProjectId = null;
+let view = 'build';                 // 'build' | 'responses'
+let forms = [];                     // forms in the active project
 let draft = { title:'', questions:[''] };
-let forms = [];
-let activeFormId = null;
+let activeFormId = null;            // selected form in the responses view
 let lastPublished = null;
 
-function inviteLink(code){
-  return `${window.location.origin}/apply.html?code=${code}`;
-}
+// --- helpers ---
+function inviteLink(code){ return `${window.location.origin}/apply.html?code=${code}`; }
 async function copyLink(code){
   const url = inviteLink(code);
-  try{
-    await navigator.clipboard.writeText(url);
-    toast('Link copied');
-  }catch(e){
-    toast(url); // clipboard blocked (e.g. non-HTTPS) — surface the URL itself instead
-  }
+  try{ await navigator.clipboard.writeText(url); toast('Link copied'); }
+  catch(e){ toast(url); }
 }
-
 function toast(msg){
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 2000);
 }
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function transcriptBlock(a){
+  if(a.transcriptStatus === 'done' && a.transcript) return `<div class="transcript">${escapeHtml(a.transcript)}</div>`;
+  if(a.transcriptStatus === 'failed') return `<div class="transcript muted">Transcript unavailable.</div>`;
+  return `<div class="transcript muted"><span class="dot"></span> Transcribing…</div>`;
+}
 
 async function api(path, opts={}){
   const r = await fetch('/api'+path, { ...opts, headers: { ...authHeaders, ...(opts.headers||{}) } });
@@ -67,23 +69,118 @@ async function api(path, opts={}){
   return data;
 }
 
-tabs.forEach(t=>t.addEventListener('click', ()=>{
-  tabs.forEach(x=>x.classList.remove('active')); t.classList.add('active');
-  view = t.dataset.view; render();
-}));
+// Downloads need the auth header, so a plain <a href> won't do — fetch the zip
+// as a blob and click a synthetic link at an object URL.
+async function downloadZip(path, filename){
+  toast('Preparing download…');
+  try{
+    const r = await fetch('/api'+path, { headers: authHeaders });
+    if(!r.ok) throw new Error('Export failed');
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 4000);
+  }catch(e){ toast(e.message); }
+}
 
+function activeProject(){ return projects.find(p => p.id === activeProjectId) || null; }
+
+// --- sidebar (project rail) ---
+function renderSidebar(){
+  const items = projects.map(p => `
+    <button class="proj-item ${p.id===activeProjectId?'active':''} ${p.archived_at?'archived':''}" data-pid="${p.id}">
+      <span class="pname">${escapeHtml(p.name)}</span>
+      <span class="pcount">${p.formCount}</span>
+    </button>`).join('');
+
+  sidebar.innerHTML = `
+    <div class="side-label">Projects</div>
+    <div class="proj-list">${items || '<div class="side-label" style="text-transform:none;">No projects yet.</div>'}</div>
+    <div class="new-proj">
+      <input type="text" id="newproj" placeholder="New project name…"/>
+      <button class="btn btn-primary" id="addproj">Add</button>
+    </div>
+    <div class="spacer"></div>
+  `;
+
+  sidebar.querySelectorAll('.proj-item').forEach(btn=>{
+    btn.onclick = () => {
+      activeProjectId = btn.dataset.pid;
+      activeFormId = null; lastPublished = null; draft = { title:'', questions:[''] };
+      render();
+    };
+  });
+  const addBtn = document.getElementById('addproj');
+  const input = document.getElementById('newproj');
+  const submit = async () => {
+    const name = input.value.trim();
+    if(!name) return toast('Name the project first');
+    try{
+      const p = await api('/projects', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+      await loadProjects();
+      activeProjectId = p.id;
+      render();
+      toast('Project created');
+    }catch(e){ toast(e.message); }
+  };
+  addBtn.onclick = submit;
+  input.onkeydown = e => { if(e.key==='Enter') submit(); };
+}
+
+async function loadProjects(){
+  try{ projects = await api('/projects'); }catch(e){ projects = []; }
+  if(!activeProjectId && projects.length) activeProjectId = projects[0].id;
+}
+
+// --- main stage ---
 async function render(){
-  if(view==='builder') await renderBuilder();
+  renderSidebar();
+  if(!activeProjectId){
+    stage.innerHTML = `
+      <h1 class="page-title">Create your first project</h1>
+      <p class="subtitle">Projects group related voice forms — a hiring round, a research study, a survey wave. Add one from the left to get started.</p>
+      <div class="empty">Name a project in the sidebar, then build forms inside it.</div>`;
+    return;
+  }
+  if(view === 'build') await renderBuilder();
   else await renderResponses();
 }
 
+function projectHeader(){
+  const p = activeProject();
+  return `
+    <div class="project-head">
+      <h1 class="page-title">${escapeHtml(p.name)}${p.archived_at?' <span class="code-pill">archived</span>':''}</h1>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="subtabs">
+          <button class="tab ${view==='build'?'active':''}" data-view="build">Build</button>
+          <button class="tab ${view==='responses'?'active':''}" data-view="responses">Responses</button>
+        </div>
+        <button class="btn btn-ghost" id="exportproj">Export project (.zip)</button>
+      </div>
+    </div>`;
+}
+
+function wireHeader(){
+  stage.querySelectorAll('.subtabs .tab').forEach(t=>{
+    t.onclick = () => { view = t.dataset.view; render(); };
+  });
+  const ex = document.getElementById('exportproj');
+  if(ex) ex.onclick = () => {
+    const p = activeProject();
+    downloadZip(`/export/projects/${p.id}`, `${p.name.replace(/[^a-z0-9]+/gi,'_')}.zip`);
+  };
+}
+
 async function renderBuilder(){
-  try{ forms = await api('/forms'); }catch(e){ forms = []; }
+  try{ forms = await api('/forms?projectId=' + activeProjectId); }catch(e){ forms = []; }
 
   const rows = draft.questions.map((q,i)=>`
     <div class="q-row" data-idx="${i}">
       <div class="q-num">Q${String(i+1).padStart(2,'0')}</div>
-      <textarea placeholder="Ask something a real interviewer would ask...">${escapeHtml(q)}</textarea>
+      <textarea placeholder="Ask a question people will answer out loud...">${escapeHtml(q)}</textarea>
       <button class="rm" title="Remove question">&times;</button>
     </div>`).join('');
 
@@ -93,16 +190,17 @@ async function renderBuilder(){
         <h3>${escapeHtml(f.title)}</h3>
         <span class="meta">${f.questionCount} question${f.questionCount===1?'':'s'} · ${f.responseCount} response${f.responseCount===1?'':'s'} · ${new Date(f.created_at).toLocaleDateString()}</span>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <span class="code-pill">${f.code}</span>
         <button class="btn btn-ghost copylink" data-code="${f.code}">Copy link</button>
         <a class="btn btn-ghost" href="${inviteLink(f.code)}" target="_blank" rel="noopener">Preview</a>
+        <button class="btn btn-ghost exportform" data-fid="${f.id}" data-title="${escapeHtml(f.title)}">Export</button>
       </div>
     </div>`).join('');
 
   const banner = lastPublished ? `
     <div class="card" style="border-color:var(--signal);">
-      <label>Share this with candidates</label>
+      <label>Share this link to collect answers</label>
       <div style="display:flex;gap:10px;align-items:center;">
         <input type="text" readonly value="${inviteLink(lastPublished.code)}" style="margin:0;" id="lastlink"/>
         <button class="btn btn-primary" id="copylastlink">Copy link</button>
@@ -110,14 +208,14 @@ async function renderBuilder(){
     </div>` : '';
 
   stage.innerHTML = `
-    <h1 class="page-title">Build a screening form</h1>
-    <p class="subtitle">Write the questions once, share a link, get back recorded answers instead of booking a call.</p>
+    ${projectHeader()}
+    <p class="subtitle">Write questions once, share a link, and get back spoken answers instead of typed ones.</p>
 
     ${banner}
 
     <div class="card">
       <label>Form title</label>
-      <input type="text" id="ftitle" placeholder="e.g. Senior Backend Engineer — First Screen" value="${escapeHtml(draft.title)}"/>
+      <input type="text" id="ftitle" placeholder="e.g. Product feedback, or Senior Engineer — First Screen" value="${escapeHtml(draft.title)}"/>
     </div>
 
     <div class="card">
@@ -129,12 +227,13 @@ async function renderBuilder(){
       </div>
     </div>
 
-    <h1 class="page-title" style="font-size:20px;margin-top:36px;">Your forms</h1>
+    <h1 class="page-title" style="font-size:20px;margin-top:36px;">Forms in this project</h1>
     <div class="card" style="padding:6px 22px;">
       ${formListRows || '<div class="empty">Published forms will appear here with a shareable link.</div>'}
     </div>
   `;
 
+  wireHeader();
   document.getElementById('ftitle').oninput = e => draft.title = e.target.value;
   document.getElementById('addq').onclick = () => { draft.questions.push(''); renderBuilder(); };
   document.querySelectorAll('#qlist textarea').forEach(ta=>{
@@ -148,8 +247,9 @@ async function renderBuilder(){
       renderBuilder();
     };
   });
-  document.querySelectorAll('.copylink').forEach(btn=>{
-    btn.onclick = () => copyLink(btn.dataset.code);
+  document.querySelectorAll('.copylink').forEach(btn=>{ btn.onclick = () => copyLink(btn.dataset.code); });
+  document.querySelectorAll('.exportform').forEach(btn=>{
+    btn.onclick = () => downloadZip(`/export/forms/${btn.dataset.fid}`, `${btn.dataset.title.replace(/[^a-z0-9]+/gi,'_')}.zip`);
   });
   const copyLastBtn = document.getElementById('copylastlink');
   if(copyLastBtn) copyLastBtn.onclick = () => copyLink(lastPublished.code);
@@ -162,9 +262,10 @@ async function renderBuilder(){
     if(!title) return toast('Give the form a title first');
     if(questions.length===0) return toast('Add at least one question');
     try{
-      const res = await api('/forms', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title, questions}) });
+      const res = await api('/forms', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, questions, projectId: activeProjectId }) });
       draft = { title:'', questions:[''] };
       lastPublished = { code: res.code, title };
+      await loadProjects();          // refresh sidebar form counts
       renderBuilder();
       copyLink(res.code);
     }catch(e){ toast(e.message); }
@@ -172,8 +273,8 @@ async function renderBuilder(){
 }
 
 async function renderResponses(){
-  try{ forms = await api('/forms'); }catch(e){ forms = []; }
-  if(!activeFormId && forms.length) activeFormId = forms[0].id;
+  try{ forms = await api('/forms?projectId=' + activeProjectId); }catch(e){ forms = []; }
+  if((!activeFormId || !forms.find(f=>f.id===activeFormId)) && forms.length) activeFormId = forms[0].id;
 
   const formOptions = forms.map(f=>`<option value="${f.id}">${escapeHtml(f.title)} (${f.code})</option>`).join('');
 
@@ -191,6 +292,7 @@ async function renderResponses(){
             ${r.answers.map((a,i)=>`
               <div class="resp-q">Q${String(i+1).padStart(2,'0')} · ${escapeHtml(a.questionText)}</div>
               <audio controls src="${a.audioUrl}" data-auth></audio>
+              ${transcriptBlock(a)}
             `).join('')}
           </div>
         </div>`).join('');
@@ -198,32 +300,37 @@ async function renderResponses(){
   }
 
   stage.innerHTML = `
-    <h1 class="page-title">Responses</h1>
-    <p class="subtitle">Review recorded answers instead of running a first-round call.</p>
+    ${projectHeader()}
+    <p class="subtitle">Play back spoken answers or skim the auto-transcript.</p>
     ${forms.length ? `
       <div class="card">
         <label>Form</label>
-        <div style="display:flex;gap:10px;align-items:center;">
-          <select id="formsel" style="flex:1;">${formOptions}</select>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <select id="formsel" style="flex:1;min-width:200px;">${formOptions}</select>
           <button class="btn btn-ghost" id="copyactive">Copy link</button>
+          <button class="btn btn-ghost" id="exportform">Export form (.zip)</button>
         </div>
       </div>
       <div class="card">${rows || '<div class="empty">No submissions yet for this form.</div>'}</div>
-    ` : `<div class="empty">Publish a form first to see responses here.</div>`}
+    ` : `<div class="empty">Publish a form in this project first to see responses here.</div>`}
   `;
 
+  wireHeader();
   const sel = document.getElementById('formsel');
   if(sel){
     sel.value = activeFormId;
     sel.onchange = e => { activeFormId = e.target.value; renderResponses(); };
   }
   const copyActiveBtn = document.getElementById('copyactive');
-  if(copyActiveBtn){
-    copyActiveBtn.onclick = () => {
-      const active = forms.find(f=>f.id===activeFormId);
-      if(active) copyLink(active.code);
-    };
-  }
+  if(copyActiveBtn) copyActiveBtn.onclick = () => {
+    const active = forms.find(f=>f.id===activeFormId);
+    if(active) copyLink(active.code);
+  };
+  const exportFormBtn = document.getElementById('exportform');
+  if(exportFormBtn) exportFormBtn.onclick = () => {
+    const active = forms.find(f=>f.id===activeFormId);
+    if(active) downloadZip(`/export/forms/${active.id}`, `${active.title.replace(/[^a-z0-9]+/gi,'_')}.zip`);
+  };
   document.querySelectorAll('.resp-head').forEach(h=>{
     h.onclick = () => document.getElementById('ans-'+h.dataset.rid).classList.toggle('open');
   });
@@ -238,7 +345,7 @@ async function renderResponses(){
   });
 }
 
-render();
+(async () => { await loadProjects(); render(); })();
 </script>
 </body>
 </html>

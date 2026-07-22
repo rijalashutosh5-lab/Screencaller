@@ -2,46 +2,73 @@
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>Signal Screen — Sign in</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SayForm — Sign in</title>
 <link rel="stylesheet" href="/style.css"/>
 </head>
 <body>
 <div class="app">
-  <div class="topbar">
-    <div class="brand"><div class="mark"></div><span>SIGNAL SCREEN</span></div>
-  </div>
-  <div class="stage narrow">
-    <h1 class="page-title" id="title">Sign in</h1>
-    <p class="subtitle">Screen candidates by voice instead of booking a call.</p>
+  <div class="auth-split">
+    <section class="auth-hero">
+      <div class="brand"><div class="mark"></div><span class="wordmark"><span class="wm-say">Say</span><span class="wm-form">Form</span></span></div>
+      <div id="hero-headline"></div>
+      <p class="hero-copy">
+        <strong>Voice-first forms for teams.</strong> Share a link, collect spoken
+        answers, and read auto-transcripts — no scheduling calls, no typing.
+      </p>
+    </section>
 
-    <div class="auth-toggle">
-      <button class="tab active" id="tablogin">Sign in</button>
-      <button class="tab" id="tabregister">Create account</button>
-    </div>
+    <section class="auth-panel">
+      <div class="auth-inner">
+        <h1 class="page-title" id="title">Sign in</h1>
+        <p class="subtitle">Collect voice answers instead of typed ones — for surveys, screenings, research and more.</p>
 
-    <div class="card" id="loginform">
-      <label>Email</label>
-      <input type="email" id="lemail"/>
-      <label>Password</label>
-      <input type="password" id="lpassword"/>
-      <div class="error" id="lerror" style="display:none;"></div>
-      <button class="btn btn-primary" id="lsubmit" style="width:100%;">Sign in</button>
-    </div>
+        <div class="auth-toggle">
+          <button class="tab active" id="tablogin">Sign in</button>
+          <button class="tab" id="tabregister">Create account</button>
+        </div>
 
-    <div class="card" id="registerform" style="display:none;">
-      <label>Your name</label>
-      <input type="text" id="rname"/>
-      <label>Company / team name</label>
-      <input type="text" id="rorg"/>
-      <label>Email</label>
-      <input type="email" id="remail"/>
-      <label>Password</label>
-      <input type="password" id="rpassword"/>
-      <div class="error" id="rerror" style="display:none;"></div>
-      <button class="btn btn-primary" id="rsubmit" style="width:100%;">Create account</button>
-    </div>
+        <div class="card" id="loginform">
+          <label>Email</label>
+          <input type="email" id="lemail"/>
+          <label>Password</label>
+          <input type="password" id="lpassword"/>
+          <div class="error" id="lerror" style="display:none;"></div>
+          <button class="btn btn-primary" id="lsubmit" style="width:100%;">Sign in</button>
+        </div>
+
+        <div class="card" id="registerform" style="display:none;">
+          <label>Your name</label>
+          <input type="text" id="rname"/>
+          <label>Organization / team name</label>
+          <input type="text" id="rorg"/>
+          <label>Email</label>
+          <input type="email" id="remail"/>
+          <label>Password</label>
+          <input type="password" id="rpassword"/>
+          <div class="error" id="rerror" style="display:none;"></div>
+          <button class="btn btn-primary" id="rsubmit" style="width:100%;">Create account</button>
+        </div>
+      </div>
+    </section>
   </div>
 </div>
+
+<script src="/rotating-headline.js"></script>
+<script>
+RotatingHeadline(document.getElementById('hero-headline'), {
+  staticText: 'Build',
+  phrases: [
+    'candidate screening forms',
+    'audio surveys',
+    'user research',
+    'voice intake forms',
+    'casting calls'
+  ],
+  holdMs: 2200,
+  transitionMs: 600
+});
+</script>
 
 <script>
 if (localStorage.getItem('token')) window.location.href = '/dashboard.html';

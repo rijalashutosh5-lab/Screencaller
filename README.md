@@ -1,16 +1,24 @@
-# Signal Screen — Voice Screening Platform
+# Signal — Voice Forms Platform
 
-A real, working platform: recruiters build screening forms, candidates answer by
-voice recording, recruiters review responses. Runs locally today; the storage
-layer is designed to swap to S3/Postgres later without touching the app logic.
+A "Google Forms, but answers are spoken, not typed" platform. Build a form of
+text questions, share a link, and get back a voice recording per question —
+useful for **hiring screens, customer/product surveys, user research, and any
+survey where hearing the answer beats reading it**. Google Forms has no native
+voice input; this fills that gap.
+
+Runs locally or in Docker; the storage layer is designed to swap to S3/Postgres
+later without touching the app logic.
 
 ## What's actually working
-- Recruiter accounts (register/login) scoped to an organization
-- Form builder — publish a form, get a 6-character share code
-- Candidate flow — enter code, consent screen, record one answer per question
-  with a live waveform, re-record before submitting
-- Recruiter dashboard — review submissions per form, play back each answer
+- Creator accounts (register/login) scoped to an organization
+- Form builder — publish a form, get a 6-character share code + link
+- Respondent flow — enter code, consent screen, record one answer per question
+  with a live waveform, re-record before submitting (works on desktop + mobile,
+  Chrome/Firefox/Safari incl. iOS)
+- Dashboard — review submissions per form, play back each answer, and read an
+  auto-generated transcript beside it
 - Consent is recorded server-side with a timestamp and IP, not just a UI checkbox
+- Transcription pipeline (mock by default, swappable for a real API — see below)
 
 ## Stack
 - Node.js (>= 22.5) + Express
@@ -19,11 +27,28 @@ layer is designed to swap to S3/Postgres later without touching the app logic.
 - Audio files stored on local disk under `/uploads`
 - JWT auth for recruiters; candidates need no account, just the form code
 
-## Run it
+## Run it with Docker (recommended)
+
+The `node:22` base image ships `node:sqlite`, so you don't need a specific Node
+version on the host — this is the easiest way to run and expose a demo.
+
+```bash
+# optional: set a real secret (defaults to a placeholder otherwise)
+export JWT_SECRET="$(openssl rand -hex 32)"
+
+docker compose up --build
+docker compose exec app npm run seed   # optional: demo login + sample forms
+```
+
+`data/` (SQLite) and `uploads/` (audio) are mounted as volumes, so forms and
+recordings survive `docker compose restart`.
+
+## Or run it directly with Node
 
 ```bash
 npm install
 cp .env.example .env      # then edit JWT_SECRET to a real random string
+npm run seed              # optional: demo login + sample forms
 npm start
 ```
 
@@ -31,12 +56,30 @@ You need **Node 22.5 or newer** (check with `node -v`) — that's what ships
 `node:sqlite`. You'll see a one-line `ExperimentalWarning: SQLite is an
 experimental feature` on startup; that's expected and harmless, not an error.
 
-Open `http://localhost:3000`:
-- `/index.html` — recruiter sign in / create account
-- `/dashboard.html` — build forms, review responses (requires sign in)
-- `/apply.html` — candidate flow (also works as `/apply.html?code=ABC123` for a direct link)
+## Using it
 
-That's it — no external services required to run this today.
+Open `http://localhost:3000`:
+- `/index.html` — creator sign in / create account
+- `/dashboard.html` — build forms, review responses + transcripts (requires sign in)
+- `/apply.html` — respondent flow (also works as `/apply.html?code=ABC123` for a direct link)
+
+The `npm run seed` script prints a demo login (`demo@example.com` / `demo1234`)
+and two sample forms so you can start immediately.
+
+**Exposing a demo publicly:** put it behind an HTTPS tunnel/proxy (e.g.
+Cloudflare Tunnel, ngrok). Microphone access and clipboard "Copy link" only work
+on `localhost` or over HTTPS — browsers block them on plain HTTP off-localhost.
+
+## Transcription
+
+Every uploaded answer is run through a transcriber (`server/transcribe.js`) and
+the result shows up beside the audio in the dashboard. It ships in **mock mode**
+by default (placeholder text, no external dependency), so the whole
+pipeline — async job → DB → UI — works out of the box.
+
+To use a real transcriber, implement the `openai` branch in
+`server/transcribe.js` (a Whisper/Claude call) and set `TRANSCRIBER=openai`. No
+other file changes.
 
 ## Project layout
 
