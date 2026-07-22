@@ -75,7 +75,8 @@ router.get('/:id/responses', (req, res) => {
     .all(form.id);
 
   const getAnswers = db.prepare(`
-    SELECT a.id, a.question_id, q.text as question_text, q.order_index
+    SELECT a.id, a.question_id, a.transcript, a.transcript_status,
+           q.text as question_text, q.order_index
     FROM answers a JOIN questions q ON q.id = a.question_id
     WHERE a.response_id = ? ORDER BY q.order_index
   `);
@@ -85,7 +86,9 @@ router.get('/:id/responses', (req, res) => {
     answers: getAnswers.all(r.id).map(a => ({
       id: a.id,
       questionText: a.question_text,
-      audioUrl: `/api/audio/${a.id}`
+      audioUrl: `/api/audio/${a.id}`,
+      transcript: a.transcript,
+      transcriptStatus: a.transcript_status
     }))
   }));
 

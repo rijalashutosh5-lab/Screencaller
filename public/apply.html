@@ -2,13 +2,14 @@
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>Signal Screen — Answer a screening form</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Signal — Answer a voice form</title>
 <link rel="stylesheet" href="/style.css"/>
 </head>
 <body>
 <div class="app">
   <div class="topbar">
-    <div class="brand"><div class="mark"></div><span>SIGNAL SCREEN</span></div>
+    <div class="brand"><div class="mark"></div><span>SIGNAL</span></div>
   </div>
   <div class="stage" id="stage"></div>
   <div class="toast" id="toast"></div>
@@ -27,8 +28,8 @@ let state = { form:null, name:'', answers:{}, blobs:{}, idx:0, consentedAt:null 
 
 function renderCodeEntry(prefill){
   stage.innerHTML = `
-    <h1 class="page-title">Answer a screening form</h1>
-    <p class="subtitle">Enter the code your recruiter shared with you.</p>
+    <h1 class="page-title">Answer a voice form</h1>
+    <p class="subtitle">Enter the code you were given to open the form.</p>
     <div class="card">
       <label>Form code</label>
       <div class="code-entry">
@@ -80,12 +81,12 @@ function renderConsent(){
     <div class="card">
       <ul class="consent-points">
         <li>Your microphone only records while you're actively answering a question — nothing runs in the background.</li>
-        <li>Each recording is attached to your name and sent to the recruiter for this role.</li>
+        <li>Each recording is attached to your name and shared with the person who created this form.</li>
         <li>You can re-record any answer before submitting, and nothing is sent until you hit Submit.</li>
       </ul>
       <div class="consent-box">
         <input type="checkbox" id="consentcheck"/>
-        <p><strong>I consent</strong> to being recorded for this screening and to my recordings being shared with the recruiter and hiring team for this role.</p>
+        <p><strong>I consent</strong> to being recorded and to my recordings being shared with the owner of this form.</p>
       </div>
       <div style="margin-top:18px;display:flex;gap:10px;">
         <button class="btn btn-ghost" id="back">Back</button>
@@ -106,6 +107,21 @@ function renderConsent(){
 }
 
 let mediaRecorder=null, mediaStream=null, chunks=[], recTimer=null, recSeconds=0, analyser=null, audioCtx=null, waveRAF=null;
+
+// Browsers disagree on recording format: Chrome/Firefox support audio/webm,
+// iOS Safari only produces audio/mp4. Pick the first supported type so
+// recording works cross-browser instead of assuming webm everywhere.
+function pickMimeType(){
+  if(typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+  for(const t of ['audio/webm','audio/mp4','audio/ogg']){
+    if(MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return '';
+}
+function extForType(type){
+  const base = (type||'').split(';')[0];
+  return {'audio/webm':'webm','audio/mp4':'m4a','audio/ogg':'ogg'}[base] || 'webm';
+}
 
 function renderQuestion(){
   const q = state.form.questions[state.idx];
@@ -145,10 +161,12 @@ async function toggleRecording(){
     try{ mediaStream = await navigator.mediaDevices.getUserMedia({audio:true}); }
     catch(e){ toast('Microphone permission was denied'); return; }
     chunks = [];
-    mediaRecorder = new MediaRecorder(mediaStream);
+    const mime = pickMimeType();
+    mediaRecorder = mime ? new MediaRecorder(mediaStream, {mimeType:mime}) : new MediaRecorder(mediaStream);
     mediaRecorder.ondataavailable = e => chunks.push(e.data);
     mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, {type:'audio/webm'});
+      const type = (mediaRecorder.mimeType || mime || 'audio/webm').split(';')[0];
+      const blob = new Blob(chunks, {type});
       const q = state.form.questions[state.idx];
       state.blobs[q.id] = blob;
       state.answers[q.id] = URL.createObjectURL(blob);
@@ -198,7 +216,7 @@ async function submit(){
   fd.append('candidateName', state.name);
   fd.append('consent', 'true');
   state.form.questions.forEach(q => {
-    if(state.blobs[q.id]) fd.append('answer_'+q.id, state.blobs[q.id], q.id+'.webm');
+    if(state.blobs[q.id]) fd.append('answer_'+q.id, state.blobs[q.id], q.id+'.'+extForType(state.blobs[q.id].type));
   });
   try{
     const r = await fetch(`/api/invite/${state._code}/submit`, { method:'POST', body: fd });
@@ -207,7 +225,7 @@ async function submit(){
     stage.innerHTML = `
       <div class="card" style="text-align:center;padding:50px 20px;">
         <h1 class="page-title">Responses submitted</h1>
-        <p class="subtitle">Thanks, ${escapeHtml(state.name)} — the recruiter will review your recordings.</p>
+        <p class="subtitle">Thanks, ${escapeHtml(state.name)} — the form owner will review your recordings.</p>
       </div>`;
   }catch(e){ toast('Could not reach the server'); }
 }

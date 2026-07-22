@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      # Set a real secret before exposing this publicly. A weak/default secret
+      # means anyone can forge recruiter JWTs.
+      JWT_SECRET: "${JWT_SECRET:-change-this-to-a-long-random-string}"
+      PORT: "3000"
+      TRANSCRIBER: "${TRANSCRIBER:-mock}"
+    volumes:
+      # Persist the SQLite DB and recorded audio across container restarts.
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    restart: unless-stopped

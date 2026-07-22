@@ -95,3 +95,18 @@ ul.consent-points{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--pa
 
 .auth-toggle{display:flex;gap:4px;background:var(--panel);padding:4px;border-radius:10px;border:1px solid var(--line);margin-bottom:20px;}
 .auth-toggle button{flex:1;}
+
+.transcript{background:var(--panel-raised);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:10px 0 4px;font-size:13px;line-height:1.55;color:var(--paper);}
+.transcript.muted{color:var(--paper-dim);font-family:var(--mono);font-size:12px;display:flex;align-items:center;gap:8px;}
+
+@media (max-width:600px){
+  .topbar{padding:14px 16px;}
+  .stage{padding:24px 16px 48px;}
+  h1.page-title{font-size:23px;}
+  .card{padding:18px;}
+  .form-list-item{flex-direction:column;align-items:flex-start;gap:12px;}
+  .form-list-item > div:last-child{width:100%;flex-wrap:wrap;}
+  .recorder{flex-wrap:wrap;}
+  canvas.wave{flex-basis:100%;order:3;width:100%;}
+  .code-entry{max-width:none;}
+}

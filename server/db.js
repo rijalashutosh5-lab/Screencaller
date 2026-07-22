@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS answers (
 );
 `);
 
+// Idempotent migration: add transcription columns to answers if an older
+// data/app.db predates them. `node:sqlite` has no ALTER ... IF NOT EXISTS, so
+// we check PRAGMA table_info first.
+const answerCols = new Set(rawDb.prepare('PRAGMA table_info(answers)').all().map(c => c.name));
+if (!answerCols.has('transcript')) {
+  rawDb.exec('ALTER TABLE answers ADD COLUMN transcript TEXT');
+}
+if (!answerCols.has('transcript_status')) {
+  rawDb.exec("ALTER TABLE answers ADD COLUMN transcript_status TEXT DEFAULT 'pending'");
+}
+
 // Thin wrapper so the rest of the app can keep using the better-sqlite3-style
 // db.prepare(sql).get(...)/.all(...)/.run(...) calls with positional '?' params.
 const db = {

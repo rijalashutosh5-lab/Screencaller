@@ -2,13 +2,14 @@
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>Signal Screen — Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Signal — Dashboard</title>
 <link rel="stylesheet" href="/style.css"/>
 </head>
 <body>
 <div class="app">
   <div class="topbar">
-    <a class="brand" href="/dashboard.html"><div class="mark"></div><span>SIGNAL SCREEN</span></a>
+    <a class="brand" href="/dashboard.html"><div class="mark"></div><span>SIGNAL</span></a>
     <div style="display:flex;align-items:center;gap:16px;">
       <div class="tabs">
         <button class="tab active" data-view="builder">Build</button>
@@ -59,6 +60,16 @@ function toast(msg){
 }
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+function transcriptBlock(a){
+  if(a.transcriptStatus === 'done' && a.transcript){
+    return `<div class="transcript">${escapeHtml(a.transcript)}</div>`;
+  }
+  if(a.transcriptStatus === 'failed'){
+    return `<div class="transcript muted">Transcript unavailable.</div>`;
+  }
+  return `<div class="transcript muted"><span class="dot"></span> Transcribing…</div>`;
+}
+
 async function api(path, opts={}){
   const r = await fetch('/api'+path, { ...opts, headers: { ...authHeaders, ...(opts.headers||{}) } });
   if(r.status === 401){ localStorage.clear(); window.location.href = '/index.html'; return; }
@@ -83,7 +94,7 @@ async function renderBuilder(){
   const rows = draft.questions.map((q,i)=>`
     <div class="q-row" data-idx="${i}">
       <div class="q-num">Q${String(i+1).padStart(2,'0')}</div>
-      <textarea placeholder="Ask something a real interviewer would ask...">${escapeHtml(q)}</textarea>
+      <textarea placeholder="Ask a question people will answer out loud...">${escapeHtml(q)}</textarea>
       <button class="rm" title="Remove question">&times;</button>
     </div>`).join('');
 
@@ -102,7 +113,7 @@ async function renderBuilder(){
 
   const banner = lastPublished ? `
     <div class="card" style="border-color:var(--signal);">
-      <label>Share this with candidates</label>
+      <label>Share this link to collect answers</label>
       <div style="display:flex;gap:10px;align-items:center;">
         <input type="text" readonly value="${inviteLink(lastPublished.code)}" style="margin:0;" id="lastlink"/>
         <button class="btn btn-primary" id="copylastlink">Copy link</button>
@@ -110,14 +121,14 @@ async function renderBuilder(){
     </div>` : '';
 
   stage.innerHTML = `
-    <h1 class="page-title">Build a screening form</h1>
-    <p class="subtitle">Write the questions once, share a link, get back recorded answers instead of booking a call.</p>
+    <h1 class="page-title">Build a voice form</h1>
+    <p class="subtitle">Write the questions once, share a link, and get back spoken answers instead of typed ones.</p>
 
     ${banner}
 
     <div class="card">
       <label>Form title</label>
-      <input type="text" id="ftitle" placeholder="e.g. Senior Backend Engineer — First Screen" value="${escapeHtml(draft.title)}"/>
+      <input type="text" id="ftitle" placeholder="e.g. Product feedback, or Senior Engineer — First Screen" value="${escapeHtml(draft.title)}"/>
     </div>
 
     <div class="card">
@@ -191,6 +202,7 @@ async function renderResponses(){
             ${r.answers.map((a,i)=>`
               <div class="resp-q">Q${String(i+1).padStart(2,'0')} · ${escapeHtml(a.questionText)}</div>
               <audio controls src="${a.audioUrl}" data-auth></audio>
+              ${transcriptBlock(a)}
             `).join('')}
           </div>
         </div>`).join('');
@@ -199,7 +211,7 @@ async function renderResponses(){
 
   stage.innerHTML = `
     <h1 class="page-title">Responses</h1>
-    <p class="subtitle">Review recorded answers instead of running a first-round call.</p>
+    <p class="subtitle">Play back spoken answers or skim the auto-transcript.</p>
     ${forms.length ? `
       <div class="card">
         <label>Form</label>
