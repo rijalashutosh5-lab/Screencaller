@@ -15,34 +15,58 @@ function genCode() {
   return code;
 }
 
+// Resolve the project a new form belongs to. An explicit projectId must belong
+// to the caller's org; otherwise fall back to (and lazily create) the org's
+// "General" project so a form is never orphaned.
+function resolveProjectId(recruiter, projectId) {
+  if (projectId) {
+    const p = db.prepare('SELECT id FROM projects WHERE id = ? AND org_id = ?').get(projectId, recruiter.orgId);
+    return p ? p.id : null;
+  }
+  const general = db
+    .prepare("SELECT id FROM projects WHERE org_id = ? AND name = 'General' LIMIT 1")
+    .get(recruiter.orgId);
+  if (general) return general.id;
+  const id = crypto.randomUUID();
+  db.prepare('INSERT INTO projects (id, org_id, created_by, name, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(id, recruiter.orgId, recruiter.id, 'General', Date.now());
+  return id;
+}
+
 // Create a form with its questions
 router.post('/', (req, res) => {
-  const { title, questions } = req.body || {};
+  const { title, questions, projectId } = req.body || {};
   if (!title || !Array.isArray(questions) || questions.length === 0) {
     return res.status(400).json({ error: 'title and a non-empty questions array are required' });
   }
+  const resolvedProjectId = resolveProjectId(req.recruiter, projectId);
+  if (!resolvedProjectId) return res.status(400).json({ error: 'Project not found' });
+
   const formId = crypto.randomUUID();
   const now = Date.now();
   let code;
   do { code = genCode(); } while (db.prepare('SELECT 1 FROM forms WHERE code = ?').get(code));
 
   db.prepare(
-    'INSERT INTO forms (id, org_id, created_by, title, code, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(formId, req.recruiter.orgId, req.recruiter.id, title, code, 'published', now);
+    'INSERT INTO forms (id, org_id, project_id, created_by, title, code, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(formId, req.recruiter.orgId, resolvedProjectId, req.recruiter.id, title, code, 'published', now);
 
   const insertQ = db.prepare('INSERT INTO questions (id, form_id, order_index, text) VALUES (?, ?, ?, ?)');
   questions.forEach((text, i) => {
     if (text && text.trim()) insertQ.run(crypto.randomUUID(), formId, i, text.trim());
   });
 
-  res.json({ id: formId, code });
+  res.json({ id: formId, code, projectId: resolvedProjectId });
 });
 
-// List this org's forms
+// List this org's forms, optionally scoped to a single project (?projectId=)
 router.get('/', (req, res) => {
-  const forms = db
-    .prepare('SELECT * FROM forms WHERE org_id = ? ORDER BY created_at DESC')
-    .all(req.recruiter.orgId);
+  const { projectId } = req.query;
+  const forms = projectId
+    ? db.prepare('SELECT * FROM forms WHERE org_id = ? AND project_id = ? ORDER BY created_at DESC')
+        .all(req.recruiter.orgId, projectId)
+    : db.prepare('SELECT * FROM forms WHERE org_id = ? ORDER BY created_at DESC')
+        .all(req.recruiter.orgId);
   const withCounts = forms.map(f => {
     const questionCount = db.prepare('SELECT COUNT(*) c FROM questions WHERE form_id = ?').get(f.id).c;
     const responseCount = db.prepare('SELECT COUNT(*) c FROM responses WHERE form_id = ?').get(f.id).c;
