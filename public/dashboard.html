@@ -10,7 +10,10 @@
 <div class="app">
   <div class="topbar">
     <a class="brand" href="/dashboard.html"><div class="mark"></div><span class="wordmark"><span class="wm-say">Say</span><span class="wm-form">Form</span></span></a>
-    <button class="signout" id="signout">Sign out</button>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <span class="tier-badge" id="tierbadge" style="display:none;"></span>
+      <button class="signout" id="signout">Sign out</button>
+    </div>
   </div>
   <div class="workspace">
     <aside class="sidebar" id="sidebar"></aside>
@@ -32,16 +35,57 @@ document.getElementById('signout').onclick = () => {
 const sidebar = document.getElementById('sidebar');
 const stage = document.getElementById('stage');
 
-// --- state ---
+// --- question types --------------------------------------------------------
+// Labels are the creator-facing names; the values match the server's registry.
+const TYPES = [
+  ['audio','Voice answer'], ['short_text','Short answer'], ['paragraph','Paragraph'],
+  ['multiple_choice','Multiple choice'], ['checkboxes','Checkboxes'], ['dropdown','Dropdown'],
+  ['linear_scale','Linear scale'], ['date','Date'], ['time','Time'],
+  ['section','Section / page break']
+];
+const TYPE_LABEL = Object.fromEntries(TYPES);
+const CHOICE = new Set(['multiple_choice','checkboxes','dropdown']);
+const OTHERABLE = new Set(['multiple_choice','checkboxes']);
+const VALIDATABLE = new Set(['short_text','paragraph']);
+
+function blankQuestion(type){
+  const q = { id:null, type:type||'audio', text:'', required:false, config:{}, answerCount:0 };
+  applyTypeDefaults(q);
+  return q;
+}
+// Config is per-type; drop what no longer applies so a type change can't leave
+// stale options behind (the server would strip them anyway).
+function applyTypeDefaults(q){
+  const cfg = {};
+  if(CHOICE.has(q.type)) {
+    cfg.options = (q.config.options && q.config.options.length) ? q.config.options : ['Option 1'];
+    if(OTHERABLE.has(q.type) && q.config.allowOther) cfg.allowOther = true;
+  }
+  if(q.type === 'linear_scale'){
+    cfg.min = q.config.min ?? 1; cfg.max = q.config.max ?? 5;
+    if(q.config.minLabel) cfg.minLabel = q.config.minLabel;
+    if(q.config.maxLabel) cfg.maxLabel = q.config.maxLabel;
+  }
+  if(q.type === 'section' && q.config.description) cfg.description = q.config.description;
+  if(VALIDATABLE.has(q.type) && q.config.validation) cfg.validation = q.config.validation;
+  q.config = cfg;
+}
+
+// --- state -----------------------------------------------------------------
+let me = null;
 let projects = [];
 let activeProjectId = null;
 let view = 'build';                 // 'build' | 'responses'
-let forms = [];                     // forms in the active project
-let draft = { title:'', questions:[''] };
-let activeFormId = null;            // selected form in the responses view
+let forms = [];
+let draft = newDraft();
+let activeFormId = null;
 let lastPublished = null;
 
-// --- helpers ---
+function newDraft(){
+  return { id:null, title:'', layout:'sectioned', requireEmail:true, questions:[blankQuestion()] };
+}
+
+// --- helpers ---------------------------------------------------------------
 function inviteLink(code){ return `${window.location.origin}/apply.html?code=${code}`; }
 async function copyLink(code){
   const url = inviteLink(code);
@@ -51,14 +95,21 @@ async function copyLink(code){
 function toast(msg){
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'), 2000);
+  setTimeout(()=>t.classList.remove('show'), 2600);
 }
-function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeHtml(s){ return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function readOnly(){ return !!(me && me.readOnly); }
 
+// Driven by transcript status, not by whether the audio file is still around —
+// a recording can be lost while its transcript survives, and that transcript is
+// then the only record of the answer.
 function transcriptBlock(a){
   if(a.transcriptStatus === 'done' && a.transcript) return `<div class="transcript">${escapeHtml(a.transcript)}</div>`;
   if(a.transcriptStatus === 'failed') return `<div class="transcript muted">Transcript unavailable.</div>`;
-  return `<div class="transcript muted"><span class="dot"></span> Transcribing…</div>`;
+  if(a.transcriptStatus === 'pending' || a.transcriptStatus === 'processing'){
+    return `<div class="transcript muted"><span class="dot"></span> Transcribing…</div>`;
+  }
+  return '';
 }
 
 async function api(path, opts={}){
@@ -68,6 +119,7 @@ async function api(path, opts={}){
   if(!r.ok) throw new Error(data.error || 'Request failed');
   return data;
 }
+function jsonBody(body){ return { headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }; }
 
 // Downloads need the auth header, so a plain <a href> won't do — fetch the zip
 // as a blob and click a synthetic link at an object URL.
@@ -87,7 +139,7 @@ async function downloadZip(path, filename){
 
 function activeProject(){ return projects.find(p => p.id === activeProjectId) || null; }
 
-// --- sidebar (project rail) ---
+// --- sidebar (project rail) ------------------------------------------------
 function renderSidebar(){
   const items = projects.map(p => `
     <button class="proj-item ${p.id===activeProjectId?'active':''} ${p.archived_at?'archived':''}" data-pid="${p.id}">
@@ -98,27 +150,29 @@ function renderSidebar(){
   sidebar.innerHTML = `
     <div class="side-label">Projects</div>
     <div class="proj-list">${items || '<div class="side-label" style="text-transform:none;">No projects yet.</div>'}</div>
+    ${readOnly() ? '' : `
     <div class="new-proj">
       <input type="text" id="newproj" placeholder="New project name…"/>
       <button class="btn btn-primary" id="addproj">Add</button>
-    </div>
+    </div>`}
     <div class="spacer"></div>
   `;
 
   sidebar.querySelectorAll('.proj-item').forEach(btn=>{
     btn.onclick = () => {
       activeProjectId = btn.dataset.pid;
-      activeFormId = null; lastPublished = null; draft = { title:'', questions:[''] };
+      activeFormId = null; lastPublished = null; draft = newDraft();
       render();
     };
   });
   const addBtn = document.getElementById('addproj');
+  if(!addBtn) return;
   const input = document.getElementById('newproj');
   const submit = async () => {
     const name = input.value.trim();
     if(!name) return toast('Name the project first');
     try{
-      const p = await api('/projects', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+      const p = await api('/projects', { method:'POST', ...jsonBody({ name }) });
       await loadProjects();
       activeProjectId = p.id;
       render();
@@ -133,19 +187,41 @@ async function loadProjects(){
   try{ projects = await api('/projects'); }catch(e){ projects = []; }
   if(!activeProjectId && projects.length) activeProjectId = projects[0].id;
 }
+async function loadMe(){
+  try{ me = await api('/me'); }catch(e){ me = null; }
+  const badge = document.getElementById('tierbadge');
+  if(me){
+    badge.style.display = '';
+    badge.textContent = me.label;
+    badge.classList.toggle('demo', me.readOnly);
+  }
+}
 
-// --- main stage ---
+// --- main stage ------------------------------------------------------------
 async function render(){
   renderSidebar();
   if(!activeProjectId){
     stage.innerHTML = `
+      ${demoBanner()}
       <h1 class="page-title">Create your first project</h1>
-      <p class="subtitle">Projects group related voice forms — a hiring round, a research study, a survey wave. Add one from the left to get started.</p>
-      <div class="empty">Name a project in the sidebar, then build forms inside it.</div>`;
+      <p class="subtitle">Projects group related forms — a hiring round, a research study, a survey wave.${readOnly()?'':' Add one from the left to get started.'}</p>
+      <div class="empty">${readOnly()?'This demo account has no projects to show.':'Name a project in the sidebar, then build forms inside it.'}</div>`;
     return;
   }
   if(view === 'build') await renderBuilder();
   else await renderResponses();
+}
+
+function demoBanner(){
+  if(!readOnly()) return '';
+  return `<div class="demo-banner"><strong>You're exploring a demo account.</strong>
+    Everything here is sample data — you can browse forms, responses and exports, but not change them.</div>`;
+}
+
+function formsLimitNote(){
+  if(!me || me.limits.maxForms == null) return '';
+  const used = me.usage.forms, cap = me.limits.maxForms;
+  return `<span class="limit-note ${used>=cap?'at-cap':''}">${used} of ${cap} forms used</span>`;
 }
 
 function projectHeader(){
@@ -174,29 +250,184 @@ function wireHeader(){
   };
 }
 
+// --- builder ---------------------------------------------------------------
+// Per-type config editor. Returns '' for types that need no extra settings.
+function questionConfig(q, i){
+  const cfg = q.config || {};
+  if(CHOICE.has(q.type)){
+    const opts = (cfg.options||[]).map((o,j)=>`
+      <div class="opt-row">
+        <input type="text" value="${escapeHtml(o)}" data-opt="${j}" placeholder="Option ${j+1}"/>
+        <button class="rm-opt" data-rmopt="${j}" title="Remove option" ${(cfg.options||[]).length<=1?'disabled':''}>&times;</button>
+      </div>`).join('');
+    return `
+      <label>Options</label>
+      ${opts}
+      <div class="row">
+        <button class="btn btn-ghost" data-addopt="1">+ Add option</button>
+        ${OTHERABLE.has(q.type) ? `<label class="req-toggle"><input type="checkbox" data-other="1" ${cfg.allowOther?'checked':''}/> Allow "Other"</label>` : ''}
+      </div>`;
+  }
+  if(q.type === 'linear_scale'){
+    return `
+      <div class="row">
+        <div><label>From</label><input class="narrow" type="number" data-min="1" value="${cfg.min ?? 1}"/></div>
+        <div><label>To</label><input class="narrow" type="number" data-max="1" value="${cfg.max ?? 5}"/></div>
+        <div class="grow"><label>Low label</label><input type="text" data-minlabel="1" value="${escapeHtml(cfg.minLabel||'')}" placeholder="optional"/></div>
+        <div class="grow"><label>High label</label><input type="text" data-maxlabel="1" value="${escapeHtml(cfg.maxLabel||'')}" placeholder="optional"/></div>
+      </div>`;
+  }
+  if(q.type === 'section'){
+    return `<label>Description</label><input type="text" data-desc="1" value="${escapeHtml(cfg.description||'')}" placeholder="Optional text under the heading"/>`;
+  }
+  if(VALIDATABLE.has(q.type)){
+    const v = cfg.validation || {};
+    const kind = v.kind || '';
+    const extra = kind === 'number'
+      ? `<div><label>Min</label><input class="narrow" type="number" data-vmin="1" value="${v.min ?? ''}"/></div>
+         <div><label>Max</label><input class="narrow" type="number" data-vmax="1" value="${v.max ?? ''}"/></div>`
+      : kind === 'regex'
+        ? `<div class="grow"><label>Pattern</label><input type="text" data-vpattern="1" value="${escapeHtml(v.pattern||'')}" placeholder="^AB-\\d+$"/></div>`
+        : '';
+    return `
+      <div class="row">
+        <div><label>Answer must be</label>
+          <select data-vkind="1">
+            <option value="" ${kind===''?'selected':''}>Anything</option>
+            <option value="email" ${kind==='email'?'selected':''}>An email address</option>
+            <option value="number" ${kind==='number'?'selected':''}>A number</option>
+            <option value="regex" ${kind==='regex'?'selected':''}>A pattern</option>
+          </select>
+        </div>
+        ${extra}
+        ${kind ? `<div class="grow"><label>Message when wrong</label><input type="text" data-vmsg="1" value="${escapeHtml(v.message||'')}" placeholder="optional"/></div>` : ''}
+      </div>`;
+  }
+  return '';
+}
+
+function questionRow(q, i, total){
+  const locked = q.answerCount > 0;
+  const isSection = q.type === 'section';
+  const opts = TYPES.map(([v,l])=>`<option value="${v}" ${q.type===v?'selected':''}>${l}</option>`).join('');
+  const cfgHtml = questionConfig(q, i);
+  return `
+    <div class="q-row ${isSection?'is-section':''}" data-idx="${i}">
+      <div class="q-head">
+        <div class="q-num">${isSection?'§':'Q'+String(i+1).padStart(2,'0')}</div>
+        <textarea data-text="1" rows="1" placeholder="${isSection?'Section heading (optional)':'Ask a question…'}">${escapeHtml(q.text)}</textarea>
+        <select data-type="1" ${locked?'disabled':''} title="${locked?'This question already has answers, so its type is locked':''}">${opts}</select>
+        ${isSection?'':`<label class="req-toggle"><input type="checkbox" data-req="1" ${q.required?'checked':''}/> Required</label>`}
+        <div class="q-tools">
+          <button data-up="1" title="Move up" ${i===0?'disabled':''}>&uarr;</button>
+          <button data-down="1" title="Move down" ${i===total-1?'disabled':''}>&darr;</button>
+          <button class="rm" data-rm="1" title="Remove">&times;</button>
+        </div>
+      </div>
+      ${cfgHtml ? `<div class="q-config">${cfgHtml}</div>` : ''}
+      ${locked ? `<div class="q-config"><span class="locked-note">${q.answerCount} answer${q.answerCount===1?'':'s'} recorded — type locked. Remove the question to retire it; past answers are kept.</span></div>` : ''}
+    </div>`;
+}
+
+// Re-renders ONLY the question list. Text inputs write straight to state on
+// input, so a full re-render on every keystroke would fight the caret — this
+// runs on structural changes only (add/remove/reorder/type change).
+function renderQuestions(){
+  const list = document.getElementById('qlist');
+  if(!list) return;
+  list.innerHTML = draft.questions.map((q,i)=>questionRow(q,i,draft.questions.length)).join('');
+  wireQuestions();
+}
+
+function wireQuestions(){
+  const list = document.getElementById('qlist');
+  list.querySelectorAll('.q-row').forEach(row=>{
+    const i = +row.dataset.idx;
+    const q = draft.questions[i];
+    const $ = sel => row.querySelector(sel);
+
+    $('[data-text]').oninput = e => { q.text = e.target.value; };
+    const typeSel = $('[data-type]');
+    typeSel.onchange = e => { q.type = e.target.value; applyTypeDefaults(q); renderQuestions(); };
+    const req = $('[data-req]');
+    if(req) req.onchange = e => { q.required = e.target.checked; };
+
+    $('[data-up]').onclick = () => { if(i>0){ swap(i,i-1); } };
+    $('[data-down]').onclick = () => { if(i<draft.questions.length-1){ swap(i,i+1); } };
+    $('[data-rm]').onclick = () => {
+      draft.questions.splice(i,1);
+      if(!draft.questions.length) draft.questions.push(blankQuestion());
+      renderQuestions();
+    };
+
+    row.querySelectorAll('[data-opt]').forEach(inp=>{
+      inp.oninput = e => { q.config.options[+e.target.dataset.opt] = e.target.value; };
+    });
+    row.querySelectorAll('[data-rmopt]').forEach(btn=>{
+      btn.onclick = () => { q.config.options.splice(+btn.dataset.rmopt,1); renderQuestions(); };
+    });
+    const addOpt = $('[data-addopt]');
+    if(addOpt) addOpt.onclick = () => {
+      q.config.options.push(`Option ${q.config.options.length+1}`); renderQuestions();
+    };
+    const other = $('[data-other]');
+    if(other) other.onchange = e => { q.config.allowOther = e.target.checked; };
+
+    const bindNum = (sel,key) => { const el=$(sel); if(el) el.oninput = e => { q.config[key] = e.target.value===''?undefined:Number(e.target.value); }; };
+    const bindStr = (sel,key) => { const el=$(sel); if(el) el.oninput = e => { q.config[key] = e.target.value; }; };
+    bindNum('[data-min]','min'); bindNum('[data-max]','max');
+    bindStr('[data-minlabel]','minLabel'); bindStr('[data-maxlabel]','maxLabel');
+    bindStr('[data-desc]','description');
+
+    const vkind = $('[data-vkind]');
+    if(vkind) vkind.onchange = e => {
+      const kind = e.target.value;
+      q.config.validation = kind ? { kind } : undefined;
+      renderQuestions();
+    };
+    const bindV = (sel,key,num) => { const el=$(sel); if(el) el.oninput = e => {
+      q.config.validation = q.config.validation || {};
+      const val = e.target.value;
+      q.config.validation[key] = val==='' ? undefined : (num?Number(val):val);
+    }; };
+    bindV('[data-vmin]','min',true); bindV('[data-vmax]','max',true);
+    bindV('[data-vpattern]','pattern'); bindV('[data-vmsg]','message');
+  });
+}
+
+function swap(a,b){
+  const q = draft.questions;
+  [q[a],q[b]] = [q[b],q[a]];
+  renderQuestions();
+}
+
 async function renderBuilder(){
   try{ forms = await api('/forms?projectId=' + activeProjectId); }catch(e){ forms = []; }
 
-  const rows = draft.questions.map((q,i)=>`
-    <div class="q-row" data-idx="${i}">
-      <div class="q-num">Q${String(i+1).padStart(2,'0')}</div>
-      <textarea placeholder="Ask a question people will answer out loud...">${escapeHtml(q)}</textarea>
-      <button class="rm" title="Remove question">&times;</button>
-    </div>`).join('');
+  const editing = !!draft.id;
+  const atCap = me && me.limits.maxForms != null && me.usage.forms >= me.limits.maxForms && !editing;
 
-  const formListRows = forms.map(f=>`
+  const formListRows = forms.map(f=>{
+    const meter = f.responseLimit != null
+      ? `<span class="limit-note ${f.responseCount>=f.responseLimit?'at-cap':''}">${f.responseCount} of ${f.responseLimit} responses</span>`
+      : `<span class="meta">${f.responseCount} response${f.responseCount===1?'':'s'}</span>`;
+    return `
     <div class="form-list-item">
       <div>
         <h3>${escapeHtml(f.title)}</h3>
-        <span class="meta">${f.questionCount} question${f.questionCount===1?'':'s'} · ${f.responseCount} response${f.responseCount===1?'':'s'} · ${new Date(f.created_at).toLocaleDateString()}</span>
+        <span class="meta">${f.questionCount} question${f.questionCount===1?'':'s'} · ${new Date(f.created_at).toLocaleDateString()}</span>
+        · ${meter}
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <span class="code-pill">${f.code}</span>
         <button class="btn btn-ghost copylink" data-code="${f.code}">Copy link</button>
         <a class="btn btn-ghost" href="${inviteLink(f.code)}" target="_blank" rel="noopener">Preview</a>
         <button class="btn btn-ghost exportform" data-fid="${f.id}" data-title="${escapeHtml(f.title)}">Export</button>
+        ${readOnly()?'':`<button class="btn btn-ghost editform" data-fid="${f.id}">Edit</button>
+        <button class="btn btn-ghost danger delform" data-fid="${f.id}" data-title="${escapeHtml(f.title)}">Delete</button>`}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   const banner = lastPublished ? `
     <div class="card" style="border-color:var(--signal);">
@@ -207,26 +438,45 @@ async function renderBuilder(){
       </div>
     </div>` : '';
 
-  stage.innerHTML = `
-    ${projectHeader()}
-    <p class="subtitle">Write questions once, share a link, and get back spoken answers instead of typed ones.</p>
-
+  const builderCard = readOnly() ? '' : `
     ${banner}
-
     <div class="card">
-      <label>Form title</label>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
+        <label style="margin:0;">${editing?'Editing form':'Form title'}</label>
+        ${formsLimitNote()}
+      </div>
       <input type="text" id="ftitle" placeholder="e.g. Product feedback, or Senior Engineer — First Screen" value="${escapeHtml(draft.title)}"/>
+      <div class="row" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;">
+        <label class="req-toggle"><input type="checkbox" id="freqemail" ${draft.requireEmail?'checked':''}/> Require respondent email</label>
+        <label class="req-toggle" style="text-transform:none;letter-spacing:0;font-family:var(--body);font-size:13px;">
+          Pages:
+          <select id="flayout" style="margin-left:6px;">
+            <option value="sectioned" ${draft.layout==='sectioned'?'selected':''}>Group by section</option>
+            <option value="one_per_page" ${draft.layout==='one_per_page'?'selected':''}>One question per page</option>
+          </select>
+        </label>
+      </div>
     </div>
 
     <div class="card">
       <label>Questions</label>
-      <div id="qlist">${rows}</div>
-      <div style="margin-top:14px;display:flex;gap:10px;">
+      <div id="qlist"></div>
+      <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;">
         <button class="btn btn-ghost" id="addq">+ Add question</button>
-        <button class="btn btn-primary" id="saveform" style="margin-left:auto;">Publish form</button>
+        <button class="btn btn-ghost" id="addsection">+ Add section</button>
+        ${editing?`<button class="btn btn-ghost" id="canceledit">Cancel</button>`:''}
+        <button class="btn btn-primary" id="saveform" style="margin-left:auto;" ${atCap?'disabled title="You have used every form your plan allows"':''}>
+          ${editing?'Save changes':'Publish form'}
+        </button>
       </div>
-    </div>
+      ${atCap?`<div class="limit-note at-cap" style="margin-top:10px;">You've used all ${me.limits.maxForms} forms on your plan. Delete one to publish another.</div>`:''}
+    </div>`;
 
+  stage.innerHTML = `
+    ${projectHeader()}
+    ${demoBanner()}
+    <p class="subtitle">Write questions once, share a link, and collect answers — spoken, typed, or picked from a list.</p>
+    ${builderCard}
     <h1 class="page-title" style="font-size:20px;margin-top:36px;">Forms in this project</h1>
     <div class="card" style="padding:6px 22px;">
       ${formListRows || '<div class="empty">Published forms will appear here with a shareable link.</div>'}
@@ -234,42 +484,110 @@ async function renderBuilder(){
   `;
 
   wireHeader();
-  document.getElementById('ftitle').oninput = e => draft.title = e.target.value;
-  document.getElementById('addq').onclick = () => { draft.questions.push(''); renderBuilder(); };
-  document.querySelectorAll('#qlist textarea').forEach(ta=>{
-    ta.oninput = e => { draft.questions[+e.target.closest('.q-row').dataset.idx] = e.target.value; };
+  if(!readOnly()){
+    renderQuestions();
+    document.getElementById('ftitle').oninput = e => draft.title = e.target.value;
+    document.getElementById('freqemail').onchange = e => draft.requireEmail = e.target.checked;
+    document.getElementById('flayout').onchange = e => draft.layout = e.target.value;
+    document.getElementById('addq').onclick = () => { draft.questions.push(blankQuestion()); renderQuestions(); };
+    document.getElementById('addsection').onclick = () => { draft.questions.push(blankQuestion('section')); renderQuestions(); };
+    const cancel = document.getElementById('canceledit');
+    if(cancel) cancel.onclick = () => { draft = newDraft(); renderBuilder(); };
+    document.getElementById('saveform').onclick = saveForm;
+  }
+
+  document.querySelectorAll('.copylink').forEach(b=>{ b.onclick = () => copyLink(b.dataset.code); });
+  document.querySelectorAll('.exportform').forEach(b=>{
+    b.onclick = () => downloadZip(`/export/forms/${b.dataset.fid}`, `${b.dataset.title.replace(/[^a-z0-9]+/gi,'_')}.zip`);
   });
-  document.querySelectorAll('#qlist .rm').forEach(btn=>{
-    btn.onclick = e => {
-      const idx = +e.target.closest('.q-row').dataset.idx;
-      draft.questions.splice(idx,1);
-      if(draft.questions.length===0) draft.questions.push('');
-      renderBuilder();
-    };
-  });
-  document.querySelectorAll('.copylink').forEach(btn=>{ btn.onclick = () => copyLink(btn.dataset.code); });
-  document.querySelectorAll('.exportform').forEach(btn=>{
-    btn.onclick = () => downloadZip(`/export/forms/${btn.dataset.fid}`, `${btn.dataset.title.replace(/[^a-z0-9]+/gi,'_')}.zip`);
-  });
+  document.querySelectorAll('.editform').forEach(b=>{ b.onclick = () => loadFormIntoDraft(b.dataset.fid); });
+  document.querySelectorAll('.delform').forEach(b=>{ b.onclick = () => deleteForm(b.dataset.fid, b.dataset.title); });
   const copyLastBtn = document.getElementById('copylastlink');
   if(copyLastBtn) copyLastBtn.onclick = () => copyLink(lastPublished.code);
   const lastLinkInput = document.getElementById('lastlink');
   if(lastLinkInput) lastLinkInput.onclick = () => lastLinkInput.select();
+}
 
-  document.getElementById('saveform').onclick = async () => {
-    const title = draft.title.trim();
-    const questions = draft.questions.map(q=>q.trim()).filter(Boolean);
-    if(!title) return toast('Give the form a title first');
-    if(questions.length===0) return toast('Add at least one question');
-    try{
-      const res = await api('/forms', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title, questions, projectId: activeProjectId }) });
-      draft = { title:'', questions:[''] };
-      lastPublished = { code: res.code, title };
-      await loadProjects();          // refresh sidebar form counts
-      renderBuilder();
-      copyLink(res.code);
-    }catch(e){ toast(e.message); }
+async function loadFormIntoDraft(id){
+  try{
+    const f = await api(`/forms/${id}`);
+    draft = {
+      id: f.id, title: f.title,
+      layout: f.layout || 'one_per_page',
+      requireEmail: !!f.require_email,
+      questions: f.questions.map(q => ({
+        id: q.id, type: q.type, text: q.text, required: !!q.required,
+        config: q.config || {}, answerCount: q.answerCount || 0
+      }))
+    };
+    if(!draft.questions.length) draft.questions.push(blankQuestion());
+    lastPublished = null;
+    await renderBuilder();
+    window.scrollTo({ top:0, behavior:'smooth' });
+  }catch(e){ toast(e.message); }
+}
+
+async function saveForm(){
+  const title = draft.title.trim();
+  if(!title) return toast('Give the form a title first');
+  // Sections may be untitled (a bare page break); real questions may not.
+  const questions = draft.questions.filter(q => q.type === 'section' || q.text.trim());
+  if(!questions.some(q => q.type !== 'section')) return toast('Add at least one question');
+
+  const payload = {
+    title, layout: draft.layout, requireEmail: draft.requireEmail,
+    projectId: activeProjectId,
+    questions: questions.map(q => ({
+      id: q.id || undefined, type: q.type, text: q.text.trim(),
+      required: q.required, config: q.config
+    }))
   };
+
+  try{
+    if(draft.id){
+      await api(`/forms/${draft.id}`, { method:'PUT', ...jsonBody(payload) });
+      draft = newDraft();
+      await loadMe(); await loadProjects();
+      await renderBuilder();
+      toast('Changes saved');
+    }else{
+      const res = await api('/forms', { method:'POST', ...jsonBody(payload) });
+      draft = newDraft();
+      lastPublished = { code: res.code, title };
+      await loadMe(); await loadProjects();
+      await renderBuilder();
+      copyLink(res.code);
+    }
+  }catch(e){ toast(e.message); }
+}
+
+async function deleteForm(id, title){
+  if(!confirm(`Delete "${title}"?\n\nThis permanently removes the form, every response to it, and every recording. This cannot be undone.`)) return;
+  try{
+    await api(`/forms/${id}`, { method:'DELETE' });
+    if(draft.id === id) draft = newDraft();
+    if(activeFormId === id) activeFormId = null;
+    await loadMe(); await loadProjects();
+    await renderBuilder();
+    toast('Form deleted');
+  }catch(e){ toast(e.message); }
+}
+
+// --- responses -------------------------------------------------------------
+function answerBlock(a){
+  if(a.type === 'audio'){
+    const player = a.audioUrl
+      ? `<audio controls src="${a.audioUrl}" data-auth></audio>`
+      : `<div class="resp-value skipped">No recording available</div>`;
+    return player + transcriptBlock(a);
+  }
+  if(a.value == null || (Array.isArray(a.value) && !a.value.length) || a.value === ''){
+    return `<div class="resp-value skipped">— skipped —</div>`;
+  }
+  if(Array.isArray(a.value)){
+    return `<div class="chips">${a.value.map(v=>`<span class="chip">${escapeHtml(v)}</span>`).join('')}</div>`;
+  }
+  return `<div class="resp-value">${escapeHtml(a.value)}</div>`;
 }
 
 async function renderResponses(){
@@ -277,6 +595,7 @@ async function renderResponses(){
   if((!activeFormId || !forms.find(f=>f.id===activeFormId)) && forms.length) activeFormId = forms[0].id;
 
   const formOptions = forms.map(f=>`<option value="${f.id}">${escapeHtml(f.title)} (${f.code})</option>`).join('');
+  const active = forms.find(f=>f.id===activeFormId);
 
   let rows = '';
   if(activeFormId){
@@ -285,23 +604,34 @@ async function renderResponses(){
       rows = list.map(r=>`
         <div class="resp-item">
           <div class="resp-head" data-rid="${r.id}">
-            <h4>${escapeHtml(r.candidate_name)}</h4>
-            <span class="meta">${new Date(r.submitted_at).toLocaleString()} ${r.consent_given_at ? '· consent recorded' : ''}</span>
+            <div>
+              <h4>${escapeHtml(r.candidate_name)}</h4>
+              <span class="resp-email">${r.respondent_email ? escapeHtml(r.respondent_email) : 'no email given'}</span>
+            </div>
+            <div class="resp-actions">
+              <span class="meta">${new Date(r.submitted_at).toLocaleString()}${r.consent_given_at ? ' · consent recorded' : ''}</span>
+              ${readOnly()?'':`<button class="btn btn-ghost danger delresp" data-rid="${r.id}" data-name="${escapeHtml(r.candidate_name)}">Delete</button>`}
+            </div>
           </div>
           <div class="resp-answers" id="ans-${r.id}">
             ${r.answers.map((a,i)=>`
               <div class="resp-q">Q${String(i+1).padStart(2,'0')} · ${escapeHtml(a.questionText)}</div>
-              <audio controls src="${a.audioUrl}" data-auth></audio>
-              ${transcriptBlock(a)}
+              ${answerBlock(a)}
             `).join('')}
           </div>
         </div>`).join('');
     }catch(e){ rows = `<div class="empty">Could not load responses.</div>`; }
   }
 
+  const capNote = active && active.responseLimit != null
+    ? `<div class="limit-note ${active.responseCount>=active.responseLimit?'at-cap':''}" style="margin-top:10px;">
+         ${active.responseCount} of ${active.responseLimit} responses received${active.responseCount>=active.responseLimit?' — this form has stopped accepting new ones.':''}
+       </div>` : '';
+
   stage.innerHTML = `
     ${projectHeader()}
-    <p class="subtitle">Play back spoken answers or skim the auto-transcript.</p>
+    ${demoBanner()}
+    <p class="subtitle">Play back spoken answers, read the transcripts, and follow up by email.</p>
     ${forms.length ? `
       <div class="card">
         <label>Form</label>
@@ -310,6 +640,7 @@ async function renderResponses(){
           <button class="btn btn-ghost" id="copyactive">Copy link</button>
           <button class="btn btn-ghost" id="exportform">Export form (.zip)</button>
         </div>
+        ${capNote}
       </div>
       <div class="card">${rows || '<div class="empty">No submissions yet for this form.</div>'}</div>
     ` : `<div class="empty">Publish a form in this project first to see responses here.</div>`}
@@ -322,30 +653,44 @@ async function renderResponses(){
     sel.onchange = e => { activeFormId = e.target.value; renderResponses(); };
   }
   const copyActiveBtn = document.getElementById('copyactive');
-  if(copyActiveBtn) copyActiveBtn.onclick = () => {
-    const active = forms.find(f=>f.id===activeFormId);
-    if(active) copyLink(active.code);
-  };
+  if(copyActiveBtn) copyActiveBtn.onclick = () => { if(active) copyLink(active.code); };
   const exportFormBtn = document.getElementById('exportform');
   if(exportFormBtn) exportFormBtn.onclick = () => {
-    const active = forms.find(f=>f.id===activeFormId);
     if(active) downloadZip(`/export/forms/${active.id}`, `${active.title.replace(/[^a-z0-9]+/gi,'_')}.zip`);
   };
   document.querySelectorAll('.resp-head').forEach(h=>{
-    h.onclick = () => document.getElementById('ans-'+h.dataset.rid).classList.toggle('open');
+    h.onclick = e => {
+      if(e.target.closest('.delresp')) return;   // the delete button isn't a toggle
+      document.getElementById('ans-'+h.dataset.rid).classList.toggle('open');
+    };
+  });
+  document.querySelectorAll('.delresp').forEach(b=>{
+    b.onclick = async () => {
+      if(!confirm(`Delete the response from ${b.dataset.name}? Its recordings are deleted too. This cannot be undone.`)) return;
+      try{
+        await api(`/forms/${activeFormId}/responses/${b.dataset.rid}`, { method:'DELETE' });
+        await renderResponses();
+        toast('Response deleted');
+      }catch(e){ toast(e.message); }
+    };
   });
 
   // Audio elements need the auth token — fetch as blob and swap in an object URL
   document.querySelectorAll('audio[data-auth]').forEach(async el => {
     try{
       const r = await fetch(el.getAttribute('src'), { headers: authHeaders });
+      if(!r.ok) throw new Error();
       const blob = await r.blob();
       el.src = URL.createObjectURL(blob);
-    }catch(e){}
+    }catch(e){
+      el.replaceWith(Object.assign(document.createElement('div'), {
+        className: 'resp-value skipped', textContent: 'Recording unavailable'
+      }));
+    }
   });
 }
 
-(async () => { await loadProjects(); render(); })();
+(async () => { await loadMe(); await loadProjects(); render(); })();
 </script>
 </body>
 </html>

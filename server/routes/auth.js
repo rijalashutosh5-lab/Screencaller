@@ -19,13 +19,21 @@ router.post('/register', (req, res) => {
   const now = Date.now();
   const passwordHash = bcrypt.hashSync(password, 10);
 
-  db.prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)').run(orgId, orgName, now);
+  // Self-serve registration lands on the capped `free` tier, never `full`.
+  // The UI no longer exposes this route — accounts are provisioned by an admin
+  // (scripts/account.js) — but the endpoint is still reachable, so it must not
+  // be able to mint an uncapped account.
+  db.prepare('INSERT INTO organizations (id, name, created_at, tier) VALUES (?, ?, ?, ?)')
+    .run(orgId, orgName, now, 'free');
   db.prepare(
     'INSERT INTO recruiters (id, org_id, email, password_hash, name, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(recruiterId, orgId, email.toLowerCase(), passwordHash, name, now);
 
   const recruiter = { id: recruiterId, org_id: orgId, email: email.toLowerCase() };
-  res.json({ token: signToken(recruiter), recruiter: { id: recruiterId, name, email, orgName } });
+  res.json({
+    token: signToken(recruiter),
+    recruiter: { id: recruiterId, name, email, orgName, tier: 'free' }
+  });
 });
 
 router.post('/login', (req, res) => {
@@ -39,7 +47,13 @@ router.post('/login', (req, res) => {
   const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(recruiter.org_id);
   res.json({
     token: signToken(recruiter),
-    recruiter: { id: recruiter.id, name: recruiter.name, email: recruiter.email, orgName: org.name }
+    recruiter: {
+      id: recruiter.id,
+      name: recruiter.name,
+      email: recruiter.email,
+      orgName: org.name,
+      tier: org.tier
+    }
   });
 });
 

@@ -1,10 +1,9 @@
 const express = require('express');
 const crypto = require('crypto');
 const db = require('../db');
-const { requireAuth } = require('../auth');
 
+// Auth + tier enforcement are applied at the mount point in server/index.js.
 const router = express.Router();
-router.use(requireAuth);
 
 // Create a project
 router.post('/', (req, res) => {

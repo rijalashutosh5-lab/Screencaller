@@ -10,14 +10,24 @@ Runs locally or in Docker; the storage layer is designed to swap to S3/Postgres
 later without touching the app logic.
 
 ## What's actually working
-- Creator accounts (register/login) scoped to an organization
-- Form builder — publish a form, get a 6-character share code + link
-- Respondent flow — enter code, consent screen, record one answer per question
-  with a live waveform, re-record before submitting (works on desktop + mobile,
-  Chrome/Firefox/Safari incl. iOS)
-- Dashboard — review submissions per form, play back each answer, and read an
-  auto-generated transcript beside it
-- Consent is recorded server-side with a timestamp and IP, not just a UI checkbox
+- **Ten question types** — voice, short answer, paragraph, multiple choice,
+  checkboxes, dropdown, linear scale, date, time, and section/page break — with
+  a per-question Required toggle, an optional "Other" free-text choice, and
+  email / number-range / regex validation
+- Form builder — reorder questions, edit a published form, publish and get a
+  6-character share code + link
+- Respondent flow — multi-page forms, one recorder per voice question with a
+  live waveform, re-record before submitting (desktop + mobile, Chrome/Firefox/
+  Safari incl. iOS)
+- **Respondent email** captured as a first-class field, required by default and
+  toggleable per form, validated on both sides and shown against every response
+- Dashboard — review submissions per form, play back voice answers, read the
+  auto-generated transcript, delete a response or a whole form
+- **Account tiers** — demo (view-only) / free (5 forms, 20 responses each) /
+  full — enforced server-side, not just hidden in the UI
+- Consent is recorded server-side with a timestamp and IP, not just a UI checkbox,
+  and is only asked for on forms that actually record audio
+- CSV + JSON + audio export, per form or per project
 - Transcription pipeline (mock by default, swappable for a real API — see below)
 
 ## Stack
@@ -25,7 +35,8 @@ later without touching the app logic.
 - SQLite via Node's **built-in** `node:sqlite` module — no native compilation,
   no Python/build tools required, works the same on Windows/Mac/Linux
 - Audio files stored on local disk under `/uploads`
-- JWT auth for recruiters; candidates need no account, just the form code
+- JWT auth for creators; respondents need no account, just the form code
+- No frontend framework and no build step — three static pages of vanilla JS
 
 ## Run it with Docker (recommended)
 
@@ -37,7 +48,7 @@ version on the host — this is the easiest way to run and expose a demo.
 export JWT_SECRET="$(openssl rand -hex 32)"
 
 docker compose up --build
-docker compose exec app npm run seed   # optional: demo login + sample forms
+docker compose exec app npm run seed   # demo logins + sample forms and responses
 ```
 
 `data/` (SQLite) and `uploads/` (audio) are mounted as volumes, so forms and
@@ -63,8 +74,37 @@ Open `http://localhost:3000`:
 - `/dashboard.html` — build forms, review responses + transcripts (requires sign in)
 - `/apply.html` — respondent flow (also works as `/apply.html?code=ABC123` for a direct link)
 
-The `npm run seed` script prints a demo login (`demo@example.com` / `demo1234`)
-and two sample forms so you can start immediately.
+`npm run seed` creates two logins:
+
+| Login | Tier | What it's for |
+|---|---|---|
+| `demo@example.com` / `demo1234` | full | A normal working account to build in |
+| `viewer@example.com` / `viewer1234` | demo | Read-only, pre-loaded with sample forms **and responses** — hand this to someone who wants a look around |
+
+## Accounts
+
+There is no self-serve sign-up. Accounts are created by an admin and the
+credentials shared with the customer directly:
+
+```bash
+docker compose exec app npm run account -- list
+docker compose exec app npm run account -- create --email a@b.co --password s3cret --org "Acme" --tier free
+docker compose exec app npm run account -- set-tier --email a@b.co --tier full
+docker compose exec app npm run account -- set-password --email a@b.co --password newpw
+```
+
+Tiers, all enforced server-side (hitting the API directly won't get you past them):
+
+| Tier | Forms | Responses per form | Writes |
+|---|---|---|---|
+| `demo` | — | — | rejected at the API; share links stop collecting |
+| `free` | 5 | 20, then intake closes | allowed |
+| `full` | unlimited | unlimited | allowed |
+
+Closing intake never hides or deletes anything already collected.
+
+**Known gap:** there's no self-service password reset — use
+`npm run account -- set-password`.
 
 **Exposing a demo publicly:** put it behind an HTTPS tunnel/proxy (e.g.
 Cloudflare Tunnel, ngrok). Microphone access and clipboard "Copy link" only work
@@ -81,23 +121,47 @@ To use a real transcriber, implement the `openai` branch in
 `server/transcribe.js` (a Whisper/Claude call) and set `TRANSCRIBER=openai`. No
 other file changes.
 
+## Tests
+
+```bash
+npm test        # runs on plain Node — no database, no container needed
+```
+
+Covers the pure modules (question config validation, submission validation,
+tiers, answer encoding) plus the two pages' own logic — paging, client-side
+validation, and the submit payload — by loading their inline scripts into a VM
+with a stubbed DOM. Layout, a real microphone, and focus behaviour still need a
+browser and a human.
+
 ## Project layout
 
 ```
 server/
-  index.js          Express app entrypoint
-  db.js             SQLite schema + connection
-  auth.js           JWT signing/verification middleware
+  index.js          Express app entrypoint; auth is mounted here, not per-router
+  db.js             SQLite schema, migrations, transaction helper
+  auth.js           JWT + per-request account/tier load, demo write block
+  tiers.js          Tier definitions and limits
+  questions.js      Question type registry, config validation
+  answerValue.js    The one place answer values are encoded/decoded/flattened
+  validation.js     Submission validation (pure; unit-tested)
+  codes.js          Share-code generation
   routes/
-    auth.js         register/login
-    forms.js        recruiter: create/list forms, view responses
-    invite.js        candidate: load form by code, submit answers
-    audio.js         recruiter-only, org-scoped audio streaming
+    auth.js         login (+ a register route no longer linked from the UI)
+    me.js           tier, limits, usage
+    projects.js     create/list/rename/archive projects
+    forms.js        build, edit, delete forms; read and delete responses
+    invite.js       public: load a form by code, submit answers
+    audio.js        org-scoped audio streaming
+    export.js       CSV + JSON + audio zip
 public/
-  index.html         recruiter sign in / register
-  dashboard.html      recruiter: builder + responses
-  apply.html          candidate flow
+  index.html          sign in
+  dashboard.html      builder + responses
+  apply.html          respondent flow
   style.css
+scripts/
+  seed.js           demo accounts, forms, and sample responses
+  account.js        admin: create accounts, set tiers, reset passwords
+test/
 uploads/              recorded audio files (gitignore this in production)
 data/                 app.db (SQLite file, gitignore this too)
 ```
@@ -117,9 +181,12 @@ knowing before you scale:
    balancer, move to Postgres — the schema in `db.js` maps over almost
    line-for-line since it's already normalized.
 
-## Security notes before real candidates use this
+## Security notes before real respondents use this
 - Set a real `JWT_SECRET` in `.env` — never use the default in production.
 - Serve over HTTPS — the app sends passwords and JWTs in plaintext over HTTP.
 - Consider a data retention policy for recordings (see `backend-architecture.md`).
-- The candidate audio upload is capped at 25MB per answer — adjust in
-  `routes/invite.js` if needed.
+- Uploads are capped at 25MB per recording, 50 files and 300 fields per
+  submission — adjust in `routes/invite.js` if needed.
+- `POST /api/auth/register` is still reachable even though the UI no longer
+  links it. It assigns the capped `free` tier, but delete the route in
+  `routes/auth.js` if you want sign-up fully closed.

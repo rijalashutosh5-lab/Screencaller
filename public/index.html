@@ -23,11 +23,6 @@
         <h1 class="page-title" id="title">Sign in</h1>
         <p class="subtitle">Collect voice answers instead of typed ones — for surveys, screenings, research and more.</p>
 
-        <div class="auth-toggle">
-          <button class="tab active" id="tablogin">Sign in</button>
-          <button class="tab" id="tabregister">Create account</button>
-        </div>
-
         <div class="card" id="loginform">
           <label>Email</label>
           <input type="email" id="lemail"/>
@@ -37,18 +32,10 @@
           <button class="btn btn-primary" id="lsubmit" style="width:100%;">Sign in</button>
         </div>
 
-        <div class="card" id="registerform" style="display:none;">
-          <label>Your name</label>
-          <input type="text" id="rname"/>
-          <label>Organization / team name</label>
-          <input type="text" id="rorg"/>
-          <label>Email</label>
-          <input type="email" id="remail"/>
-          <label>Password</label>
-          <input type="password" id="rpassword"/>
-          <div class="error" id="rerror" style="display:none;"></div>
-          <button class="btn btn-primary" id="rsubmit" style="width:100%;">Create account</button>
-        </div>
+        <p class="auth-note">
+          Accounts are set up by the SayForm team — there's no self-serve sign-up.
+          Need one, or lost your password? Get in touch and we'll sort it out.
+        </p>
       </div>
     </section>
   </div>
@@ -73,23 +60,6 @@ RotatingHeadline(document.getElementById('hero-headline'), {
 <script>
 if (localStorage.getItem('token')) window.location.href = '/dashboard.html';
 
-const tablogin = document.getElementById('tablogin');
-const tabregister = document.getElementById('tabregister');
-const loginform = document.getElementById('loginform');
-const registerform = document.getElementById('registerform');
-const title = document.getElementById('title');
-
-tablogin.onclick = () => {
-  tablogin.classList.add('active'); tabregister.classList.remove('active');
-  loginform.style.display=''; registerform.style.display='none';
-  title.textContent = 'Sign in';
-};
-tabregister.onclick = () => {
-  tabregister.classList.add('active'); tablogin.classList.remove('active');
-  registerform.style.display=''; loginform.style.display='none';
-  title.textContent = 'Create your account';
-};
-
 document.getElementById('lsubmit').onclick = async () => {
   const email = document.getElementById('lemail').value.trim();
   const password = document.getElementById('lpassword').value;
@@ -108,25 +78,12 @@ document.getElementById('lsubmit').onclick = async () => {
   } catch(e) { err.textContent = 'Could not reach the server'; err.style.display=''; }
 };
 
-document.getElementById('rsubmit').onclick = async () => {
-  const name = document.getElementById('rname').value.trim();
-  const orgName = document.getElementById('rorg').value.trim();
-  const email = document.getElementById('remail').value.trim();
-  const password = document.getElementById('rpassword').value;
-  const err = document.getElementById('rerror');
-  err.style.display = 'none';
-  try {
-    const r = await fetch('/api/auth/register', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, orgName, email, password})
-    });
-    const data = await r.json();
-    if(!r.ok) { err.textContent = data.error || 'Could not create account'; err.style.display=''; return; }
-    localStorage.setItem('token', data.token);
-    localStorage.setItem('recruiter', JSON.stringify(data.recruiter));
-    window.location.href = '/dashboard.html';
-  } catch(e) { err.textContent = 'Could not reach the server'; err.style.display=''; }
-};
+// Enter submits from either field.
+['lemail','lpassword'].forEach(id => {
+  document.getElementById(id).onkeydown = e => {
+    if (e.key === 'Enter') document.getElementById('lsubmit').click();
+  };
+});
 </script>
 </body>
 </html>

@@ -1,11 +1,11 @@
 const express = require('express');
 const path = require('path');
 const db = require('../db');
-const { requireAuth } = require('../auth');
 
+// Auth is applied at the mount point in server/index.js.
 const router = express.Router();
 
-router.get('/:answerId', requireAuth, (req, res) => {
+router.get('/:answerId', (req, res) => {
   const row = db
     .prepare(
       `SELECT a.audio_path, f.org_id
@@ -16,10 +16,16 @@ router.get('/:answerId', requireAuth, (req, res) => {
     )
     .get(req.params.answerId);
 
-  if (!row || row.org_id !== req.recruiter.orgId) {
+  // audio_path is NULL for every non-audio answer type, so the guard is not
+  // just an ownership check — path.resolve(null) would throw.
+  if (!row || !row.audio_path || row.org_id !== req.recruiter.orgId) {
     return res.status(404).json({ error: 'Not found' });
   }
-  res.sendFile(path.resolve(row.audio_path));
+  res.sendFile(path.resolve(row.audio_path), err => {
+    // The row can outlive its file (retention cleanup, a lost volume). Answer
+    // with JSON rather than falling through to Express's HTML error page.
+    if (err && !res.headersSent) res.status(404).json({ error: 'Recording not found' });
+  });
 });
 
 module.exports = router;

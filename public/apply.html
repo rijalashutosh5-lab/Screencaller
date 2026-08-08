@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>SayForm — Answer a voice form</title>
+<title>SayForm — Answer a form</title>
 <link rel="stylesheet" href="/style.css"/>
 </head>
 <body>
@@ -19,16 +19,60 @@
 function toast(msg){
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'), 2000);
+  setTimeout(()=>t.classList.remove('show'), 2600);
 }
-function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeHtml(s){ return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// Mirrors server/validation.js — the server re-checks everything, this is just
+// for instant feedback.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isEmail = v => typeof v === 'string' && v.length <= 254 && EMAIL_RE.test(v.trim());
 
 const stage = document.getElementById('stage');
-let state = { form:null, name:'', answers:{}, blobs:{}, idx:0, consentedAt:null };
+let state = {
+  form:null, code:null, name:'', email:'',
+  values:{},      // questionId -> string | string[] | number
+  otherText:{},   // questionId -> free text for an "Other" choice
+  blobs:{},       // questionId -> recorded Blob
+  urls:{},        // questionId -> object URL for playback
+  pages:[], page:0, errors:{}, consentedAt:null
+};
 
+const isAudioForm = () => (state.form.questions||[]).some(q => q.type === 'audio');
+
+// --- paging ----------------------------------------------------------------
+// A section is both a heading and a page break. With layout 'one_per_page'
+// every question stands alone; with 'sectioned' a page holds everything up to
+// the next section.
+function buildPages(questions, layout){
+  const pages = [];
+  let current = { heading:null, items:[] };
+  const flush = () => { if(current.items.length || current.heading) pages.push(current); };
+
+  for(const q of questions){
+    if(q.type === 'section'){
+      flush();
+      current = { heading:{ title:q.text, description:(q.config||{}).description||'' }, items:[] };
+      continue;
+    }
+    if(layout === 'one_per_page'){
+      // Keep a preceding section heading attached to the question that follows it.
+      if(current.items.length){ flush(); current = { heading:null, items:[] }; }
+      current.items.push(q);
+      flush();
+      current = { heading:null, items:[] };
+    } else {
+      current.items.push(q);
+    }
+  }
+  flush();
+  return pages.filter(p => p.items.length);
+}
+
+// --- code entry ------------------------------------------------------------
 function renderCodeEntry(prefill){
   stage.innerHTML = `
-    <h1 class="page-title">Answer a voice form</h1>
+    <h1 class="page-title">Answer a form</h1>
     <p class="subtitle">Enter the code you were given to open the form.</p>
     <div class="card">
       <label>Form code</label>
@@ -51,26 +95,64 @@ async function openCode(){
     const r = await fetch('/api/invite/'+code);
     const data = await r.json();
     if(!r.ok){ err.textContent = data.error || 'No form found'; err.style.display=''; return; }
-    state.form = data; state.answers = {}; state.blobs = {}; state.idx = 0; state.consentedAt = null; state._code = code;
-    renderName();
+    startForm(data, code);
   }catch(e){ err.textContent = 'Could not reach the server'; err.style.display=''; }
 }
 
-function renderName(){
+function startForm(data, code){
+  state.code = code;
+  state.form = data;
+  state.values = {}; state.otherText = {}; state.blobs = {}; state.urls = {};
+  state.errors = {}; state.page = 0; state.consentedAt = null;
+  if(data.intake && data.intake.open === false) return renderClosed();
+  state.pages = buildPages(data.questions || [], data.layout || 'one_per_page');
+  renderIntro();
+}
+
+function renderClosed(){
+  stage.innerHTML = `
+    <div class="card" style="text-align:center;padding:50px 24px;">
+      <h1 class="page-title">${escapeHtml(state.form.title || 'This form')}</h1>
+      <p class="subtitle" style="margin-bottom:0;">${escapeHtml(state.form.intake.message)}</p>
+    </div>`;
+}
+
+// --- intro: name + email ---------------------------------------------------
+function renderIntro(){
+  const needEmail = !!state.form.requireEmail;
+  const count = state.pages.reduce((n,p)=>n+p.items.length, 0);
   stage.innerHTML = `
     <h1 class="page-title">${escapeHtml(state.form.title)}</h1>
-    <p class="subtitle">${state.form.questions.length} questions · answer each with a short voice recording</p>
+    <p class="subtitle">${count} question${count===1?'':'s'}${isAudioForm()?' · some are answered by voice':''}</p>
     <div class="card">
       <label>Your name</label>
-      <input type="text" id="cname"/>
-      <div><button class="btn btn-primary" id="start">Start</button></div>
+      <input type="text" id="cname" value="${escapeHtml(state.name)}"/>
+      <div class="q-error" id="err-name" style="display:none;"></div>
+      <label>Your email${needEmail?'':' (optional)'}</label>
+      <input type="email" id="cemail" value="${escapeHtml(state.email)}"/>
+      <div class="q-error" id="err-email" style="display:none;"></div>
+      <div style="margin-top:6px;"><button class="btn btn-primary" id="start">Start</button></div>
     </div>
   `;
+  const nameIn = document.getElementById('cname');
+  const emailIn = document.getElementById('cemail');
+  nameIn.oninput = e => state.name = e.target.value;
+  emailIn.oninput = e => state.email = e.target.value;
+
   document.getElementById('start').onclick = () => {
-    const name = document.getElementById('cname').value.trim();
-    if(!name) return toast('Enter your name to begin');
-    state.name = name;
-    renderConsent();
+    const showErr = (id,msg) => {
+      const el = document.getElementById(id);
+      el.textContent = msg; el.style.display = msg ? '' : 'none';
+      return !msg;
+    };
+    const okName = showErr('err-name', state.name.trim() ? '' : 'Enter your name');
+    let emailMsg = '';
+    if(needEmail && !state.email.trim()) emailMsg = 'Enter your email address';
+    else if(state.email.trim() && !isEmail(state.email)) emailMsg = 'Enter a valid email address';
+    const okEmail = showErr('err-email', emailMsg);
+    if(!okName || !okEmail) return;
+    // Consent is about being recorded — a form with no voice questions skips it.
+    if(isAudioForm()) renderConsent(); else { state.page = 0; renderPage(); }
   };
 }
 
@@ -97,20 +179,267 @@ function renderConsent(){
   const check = document.getElementById('consentcheck');
   const agree = document.getElementById('agree');
   check.onchange = () => agree.disabled = !check.checked;
-  document.getElementById('back').onclick = renderName;
+  document.getElementById('back').onclick = renderIntro;
   agree.onclick = () => {
     if(!check.checked) return;
     state.consentedAt = Date.now();
-    state.idx = 0;
-    renderQuestion();
+    state.page = 0;
+    renderPage();
   };
 }
 
-let mediaRecorder=null, mediaStream=null, chunks=[], recTimer=null, recSeconds=0, analyser=null, audioCtx=null, waveRAF=null;
+// --- question fields -------------------------------------------------------
+function fieldHtml(q){
+  const cfg = q.config || {};
+  const v = state.values[q.id];
+  switch(q.type){
+    case 'short_text':
+      return `<input type="text" data-in="${q.id}" value="${escapeHtml(v||'')}"/>`;
+    case 'paragraph':
+      return `<textarea data-in="${q.id}" rows="4">${escapeHtml(v||'')}</textarea>`;
+    case 'date':
+      return `<input type="date" data-in="${q.id}" value="${escapeHtml(v||'')}"/>`;
+    case 'time':
+      return `<input type="time" data-in="${q.id}" value="${escapeHtml(v||'')}"/>`;
+    case 'dropdown':
+      return `<select data-in="${q.id}">
+          <option value="">Choose…</option>
+          ${(cfg.options||[]).map(o=>`<option value="${escapeHtml(o)}" ${v===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}
+        </select>`;
+    case 'multiple_choice': {
+      const known = (cfg.options||[]);
+      const isOther = v != null && v !== '' && !known.includes(v);
+      return known.map(o=>`
+        <label class="choice"><input type="radio" name="r-${q.id}" data-radio="${q.id}" value="${escapeHtml(o)}" ${v===o?'checked':''}/><span>${escapeHtml(o)}</span></label>`).join('')
+        + (cfg.allowOther ? `
+        <label class="choice other-row">
+          <input type="radio" name="r-${q.id}" data-radio="${q.id}" value="__other__" ${isOther?'checked':''}/>
+          <input type="text" data-other="${q.id}" placeholder="Other…" value="${escapeHtml(isOther ? v : (state.otherText[q.id]||''))}"/>
+        </label>` : '');
+    }
+    case 'checkboxes': {
+      const picked = Array.isArray(v) ? v : [];
+      const known = (cfg.options||[]);
+      const otherVal = picked.find(p => !known.includes(p));
+      return known.map(o=>`
+        <label class="choice"><input type="checkbox" data-check="${q.id}" value="${escapeHtml(o)}" ${picked.includes(o)?'checked':''}/><span>${escapeHtml(o)}</span></label>`).join('')
+        + (cfg.allowOther ? `
+        <label class="choice other-row">
+          <input type="checkbox" data-checkother="${q.id}" ${otherVal?'checked':''}/>
+          <input type="text" data-other="${q.id}" placeholder="Other…" value="${escapeHtml(otherVal || state.otherText[q.id] || '')}"/>
+        </label>` : '');
+    }
+    case 'linear_scale': {
+      const min = cfg.min ?? 1, max = cfg.max ?? 5;
+      let pts = '';
+      for(let n=min;n<=max;n++){
+        pts += `<label class="scale-pt ${v===n?'picked':''}">
+          <span>${n}</span>
+          <input type="radio" name="s-${q.id}" data-scale="${q.id}" value="${n}" ${v===n?'checked':''}/>
+        </label>`;
+      }
+      return `<div class="scale">
+        ${cfg.minLabel?`<span class="scale-end">${escapeHtml(cfg.minLabel)}</span>`:''}
+        ${pts}
+        ${cfg.maxLabel?`<span class="scale-end">${escapeHtml(cfg.maxLabel)}</span>`:''}
+      </div>`;
+    }
+    case 'audio':
+      return `<div class="rec-wrap" id="rec-${q.id}">${recorderHtml(q)}</div>`;
+    default:
+      return '';
+  }
+}
 
-// Browsers disagree on recording format: Chrome/Firefox support audio/webm,
-// iOS Safari only produces audio/mp4. Pick the first supported type so
-// recording works cross-browser instead of assuming webm everywhere.
+// Rendered on its own so recording can repaint just this subtree — a full page
+// re-render would wipe every other field's uncommitted text and the caret.
+function recorderHtml(q){
+  const rec = activeRec && activeRec.qid === q.id;
+  const have = !!state.urls[q.id];
+  return `
+    <div class="recorder">
+      <button class="rec-btn ${rec?'recording':'idle'}" data-rec="${q.id}"></button>
+      <canvas class="wave" id="wave-${q.id}" width="600" height="44"></canvas>
+      <div class="timer" id="timer-${q.id}">${rec?fmtTime(activeRec.seconds):'0:00'}</div>
+    </div>
+    ${have?`<div class="answer-row"><audio controls src="${state.urls[q.id]}"></audio><button class="btn btn-ghost" data-redo="${q.id}">Re-record</button></div>`:''}
+    <div class="status-line"><div class="dot"></div><span>${rec?'Recording… tap again to stop':(have?'Answer captured':'Tap the red button to record')}</span></div>`;
+}
+function fmtTime(s){ return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
+
+function questionHtml(q, n){
+  const cfg = q.config || {};
+  const err = state.errors[q.id];
+  return `
+    <div class="q-block ${err?'has-error':''}" data-q="${q.id}">
+      <p class="q-label">${escapeHtml(q.text)}${q.required?'<span class="req">*</span>':''}</p>
+      ${cfg.help?`<p class="q-help">${escapeHtml(cfg.help)}</p>`:''}
+      ${fieldHtml(q)}
+      ${err?`<div class="q-error">${escapeHtml(err)}</div>`:''}
+    </div>`;
+}
+
+// --- page rendering --------------------------------------------------------
+function renderPage(){
+  const page = state.pages[state.page];
+  const last = state.page === state.pages.length - 1;
+  stage.innerHTML = `
+    ${state.pages.length>1?`<div class="page-progress">Page ${state.page+1} of ${state.pages.length}</div>`:''}
+    ${page.heading?`<div class="section-head">
+        <h2>${escapeHtml(page.heading.title||'')}</h2>
+        ${page.heading.description?`<p>${escapeHtml(page.heading.description)}</p>`:''}
+      </div>`:''}
+    <div class="card">
+      ${page.items.map((q,i)=>questionHtml(q,i)).join('')}
+    </div>
+    <div style="display:flex;gap:10px;justify-content:space-between;">
+      <button class="btn btn-ghost" id="prevp" ${state.page===0?'disabled':''}>Back</button>
+      <button class="btn btn-primary" id="nextp">${last?'Submit':'Next'}</button>
+    </div>`;
+
+  bindPage(page);
+  document.getElementById('prevp').onclick = () => { if(state.page>0){ stopRecording(); state.page--; renderPage(); } };
+  document.getElementById('nextp').onclick = () => {
+    stopRecording();
+    if(!validatePage(page)){ renderPage(); return; }
+    if(last) submit();
+    else { state.page++; renderPage(); }
+  };
+}
+
+function bindPage(page){
+  for(const q of page.items){
+    const root = document.querySelector(`[data-q="${q.id}"]`);
+    if(!root) continue;
+
+    const text = root.querySelector(`[data-in="${q.id}"]`);
+    if(text) text.oninput = e => {
+      const val = e.target.value;
+      state.values[q.id] = q.type === 'linear_scale' ? Number(val) : val;
+    };
+
+    root.querySelectorAll(`[data-radio="${q.id}"]`).forEach(el=>{
+      el.onchange = () => {
+        if(el.value === '__other__'){
+          state.values[q.id] = state.otherText[q.id] || '';
+        } else state.values[q.id] = el.value;
+      };
+    });
+    root.querySelectorAll(`[data-scale="${q.id}"]`).forEach(el=>{
+      el.onchange = () => {
+        state.values[q.id] = Number(el.value);
+        // Repaint just this question so the picked number highlights.
+        root.outerHTML = questionHtml(q, 0);
+        bindPage({ items:[q] });
+      };
+    });
+
+    const readChecks = () => {
+      const picked = [...root.querySelectorAll(`[data-check="${q.id}"]`)].filter(c=>c.checked).map(c=>c.value);
+      const otherBox = root.querySelector(`[data-checkother="${q.id}"]`);
+      if(otherBox && otherBox.checked && (state.otherText[q.id]||'').trim()) picked.push(state.otherText[q.id].trim());
+      state.values[q.id] = picked;
+    };
+    root.querySelectorAll(`[data-check="${q.id}"]`).forEach(el=>{ el.onchange = readChecks; });
+    const otherBox = root.querySelector(`[data-checkother="${q.id}"]`);
+    if(otherBox) otherBox.onchange = readChecks;
+
+    const otherText = root.querySelector(`[data-other="${q.id}"]`);
+    if(otherText) otherText.oninput = e => {
+      state.otherText[q.id] = e.target.value;
+      if(q.type === 'checkboxes') readChecks();
+      else {
+        const otherRadio = root.querySelector(`[data-radio="${q.id}"][value="__other__"]`);
+        if(otherRadio && otherRadio.checked) state.values[q.id] = e.target.value;
+      }
+    };
+
+    const recBtn = root.querySelector(`[data-rec="${q.id}"]`);
+    if(recBtn) recBtn.onclick = () => toggleRecording(q.id);
+    const redo = root.querySelector(`[data-redo="${q.id}"]`);
+    if(redo) redo.onclick = () => {
+      delete state.blobs[q.id];
+      if(state.urls[q.id]) URL.revokeObjectURL(state.urls[q.id]);
+      delete state.urls[q.id];
+      repaintRecorder(q);
+    };
+  }
+}
+
+// Repaint one recorder without touching the rest of the page.
+function repaintRecorder(q){
+  const wrap = document.getElementById('rec-'+q.id);
+  if(!wrap) return;
+  wrap.innerHTML = recorderHtml(q);
+  const root = document.querySelector(`[data-q="${q.id}"]`);
+  const recBtn = root.querySelector(`[data-rec="${q.id}"]`);
+  if(recBtn) recBtn.onclick = () => toggleRecording(q.id);
+  const redo = root.querySelector(`[data-redo="${q.id}"]`);
+  if(redo) redo.onclick = () => {
+    delete state.blobs[q.id];
+    if(state.urls[q.id]) URL.revokeObjectURL(state.urls[q.id]);
+    delete state.urls[q.id];
+    repaintRecorder(q);
+  };
+}
+
+// --- client-side validation ------------------------------------------------
+function checkRule(rule, value){
+  if(!rule) return null;
+  const msg = rule.message || null;
+  if(rule.maxLength !== undefined && value.length > rule.maxLength) return msg || `Keep this under ${rule.maxLength} characters`;
+  if(rule.kind === 'email' && !isEmail(value)) return msg || 'Enter a valid email address';
+  if(rule.kind === 'number'){
+    const n = Number(value);
+    if(!Number.isFinite(n)) return msg || 'Enter a number';
+    if(rule.min !== undefined && n < rule.min) return msg || `Enter a number of at least ${rule.min}`;
+    if(rule.max !== undefined && n > rule.max) return msg || `Enter a number no more than ${rule.max}`;
+  }
+  if(rule.kind === 'regex' && rule.pattern){
+    try{ if(!new RegExp(rule.pattern).test(value)) return msg || 'This does not match the expected format'; }
+    catch(e){ /* the server is authoritative if the pattern is unusable here */ }
+  }
+  return null;
+}
+
+function isBlank(v){
+  if(v == null) return true;
+  if(Array.isArray(v)) return v.length === 0;
+  return String(v).trim() === '';
+}
+
+function validatePage(page){
+  state.errors = {};
+  for(const q of page.items){
+    if(q.type === 'audio'){
+      if(q.required && !state.blobs[q.id]) state.errors[q.id] = 'Record an answer for this question';
+      continue;
+    }
+    const v = state.values[q.id];
+    if(isBlank(v)){
+      if(q.required) state.errors[q.id] = 'This question is required';
+      continue;
+    }
+    const cfg = q.config || {};
+    if(q.type === 'linear_scale'){
+      const min = cfg.min ?? 1, max = cfg.max ?? 5;
+      if(!Number.isInteger(v) || v < min || v > max) state.errors[q.id] = `Pick a rating between ${min} and ${max}`;
+      continue;
+    }
+    if(q.type === 'short_text' || q.type === 'paragraph'){
+      const err = checkRule(cfg.validation, String(v).trim());
+      if(err) state.errors[q.id] = err;
+    }
+  }
+  return Object.keys(state.errors).length === 0;
+}
+
+// --- recording -------------------------------------------------------------
+// There is one microphone, so there is one recorder — keyed by the question it
+// belongs to. The old code resolved the target from the page index, which sent
+// the blob to the wrong question once a page could hold more than one.
+let activeRec = null;
+
 function pickMimeType(){
   if(typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
   for(const t of ['audio/webm','audio/mp4','audio/ogg']){
@@ -123,83 +452,83 @@ function extForType(type){
   return {'audio/webm':'webm','audio/mp4':'m4a','audio/ogg':'ogg'}[base] || 'webm';
 }
 
-function renderQuestion(){
-  const q = state.form.questions[state.idx];
-  const existing = state.answers[q.id];
-  stage.innerHTML = `
-    <div class="card qcard">
-      <div class="eyebrow">QUESTION ${state.idx+1} OF ${state.form.questions.length}</div>
-      <p class="qtext">${escapeHtml(q.text)}</p>
-      <div class="recorder">
-        <button class="rec-btn idle" id="recbtn"></button>
-        <canvas class="wave" id="wave" width="600" height="44"></canvas>
-        <div class="timer" id="timer">0:00</div>
-      </div>
-      ${existing ? `<div class="answer-row"><audio controls src="${existing}"></audio><button class="btn btn-ghost" id="redo">Re-record</button></div>` : ''}
-      <div class="status-line"><div class="dot"></div><span id="statustext">${existing ? 'Answer captured' : 'Tap the red button to record your answer'}</span></div>
-    </div>
-    <div style="display:flex;gap:10px;justify-content:space-between;">
-      <button class="btn btn-ghost" id="prevq" ${state.idx===0?'disabled':''}>Back</button>
-      ${state.idx===state.form.questions.length-1
-        ? `<button class="btn btn-primary" id="submit" ${existing?'':'disabled'}>Submit responses</button>`
-        : `<button class="btn btn-primary" id="nextq" ${existing?'':'disabled'}>Next question</button>`}
-    </div>
-  `;
-  document.getElementById('recbtn').onclick = toggleRecording;
-  const redo = document.getElementById('redo');
-  if(redo) redo.onclick = () => { delete state.answers[q.id]; delete state.blobs[q.id]; renderQuestion(); };
-  document.getElementById('prevq').onclick = () => { state.idx--; renderQuestion(); };
-  const nextBtn = document.getElementById('nextq');
-  if(nextBtn) nextBtn.onclick = () => { state.idx++; renderQuestion(); };
-  const submitBtn = document.getElementById('submit');
-  if(submitBtn) submitBtn.onclick = submit;
-}
-
-async function toggleRecording(){
-  const btn = document.getElementById('recbtn');
-  if(!mediaRecorder || mediaRecorder.state !== 'recording'){
-    try{ mediaStream = await navigator.mediaDevices.getUserMedia({audio:true}); }
-    catch(e){ toast('Microphone permission was denied'); return; }
-    chunks = [];
-    const mime = pickMimeType();
-    mediaRecorder = mime ? new MediaRecorder(mediaStream, {mimeType:mime}) : new MediaRecorder(mediaStream);
-    mediaRecorder.ondataavailable = e => chunks.push(e.data);
-    mediaRecorder.onstop = () => {
-      const type = (mediaRecorder.mimeType || mime || 'audio/webm').split(';')[0];
-      const blob = new Blob(chunks, {type});
-      const q = state.form.questions[state.idx];
-      state.blobs[q.id] = blob;
-      state.answers[q.id] = URL.createObjectURL(blob);
-      mediaStream.getTracks().forEach(t=>t.stop());
-      cancelAnimationFrame(waveRAF);
-      renderQuestion();
-    };
-    mediaRecorder.start();
-    btn.classList.remove('idle'); btn.classList.add('recording');
-    document.getElementById('statustext').textContent = 'Recording... tap again to stop';
-    recSeconds = 0;
-    recTimer = setInterval(()=>{
-      recSeconds++;
-      document.getElementById('timer').textContent = Math.floor(recSeconds/60)+':'+String(recSeconds%60).padStart(2,'0');
-    },1000);
-    startWave();
-  } else {
-    mediaRecorder.stop();
-    clearInterval(recTimer);
+function stopRecording(){
+  if(activeRec && activeRec.recorder && activeRec.recorder.state === 'recording'){
+    activeRec.recorder.stop();
   }
 }
 
-async function startWave(){
-  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-  const src = audioCtx.createMediaStreamSource(mediaStream);
-  analyser = audioCtx.createAnalyser();
+async function toggleRecording(qid){
+  if(activeRec && activeRec.recorder.state === 'recording'){
+    const wasSame = activeRec.qid === qid;
+    activeRec.recorder.stop();
+    if(wasSame) return;         // stopping is the whole action
+    // switching questions: wait for onstop to settle before starting the next
+    await new Promise(r => setTimeout(r, 60));
+  }
+
+  let stream;
+  try{ stream = await navigator.mediaDevices.getUserMedia({audio:true}); }
+  catch(e){ toast('Microphone permission was denied'); return; }
+
+  const mime = pickMimeType();
+  const recorder = mime ? new MediaRecorder(stream, {mimeType:mime}) : new MediaRecorder(stream);
+  const q = currentQuestion(qid);
+  activeRec = { qid, recorder, stream, chunks:[], seconds:0, timer:null, raf:null, audioCtx:null };
+
+  recorder.ondataavailable = e => activeRec && activeRec.chunks.push(e.data);
+  recorder.onstop = () => {
+    const rec = activeRec;
+    if(!rec) return;
+    const type = (recorder.mimeType || mime || 'audio/webm').split(';')[0];
+    const blob = new Blob(rec.chunks, {type});
+    // The target comes off the recorder itself, never off the page index.
+    state.blobs[rec.qid] = blob;
+    if(state.urls[rec.qid]) URL.revokeObjectURL(state.urls[rec.qid]);
+    state.urls[rec.qid] = URL.createObjectURL(blob);
+    cleanupRec(rec);
+    activeRec = null;
+    const question = currentQuestion(rec.qid);
+    if(question) repaintRecorder(question);
+  };
+
+  recorder.start();
+  repaintRecorder(q);
+  activeRec.timer = setInterval(()=>{
+    if(!activeRec) return;
+    activeRec.seconds++;
+    const el = document.getElementById('timer-'+activeRec.qid);
+    if(el) el.textContent = fmtTime(activeRec.seconds);
+  },1000);
+  startWave(qid);
+}
+
+function cleanupRec(rec){
+  clearInterval(rec.timer);
+  if(rec.raf) cancelAnimationFrame(rec.raf);
+  if(rec.stream) rec.stream.getTracks().forEach(t=>t.stop());
+  if(rec.audioCtx) rec.audioCtx.close().catch(()=>{});
+}
+
+function currentQuestion(qid){
+  for(const p of state.pages){ const q = p.items.find(x=>x.id===qid); if(q) return q; }
+  return null;
+}
+
+function startWave(qid){
+  const canvas = document.getElementById('wave-'+qid);
+  if(!canvas || !activeRec) return;
+  const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(activeRec.stream);
+  const analyser = audioCtx.createAnalyser();
   analyser.fftSize = 256;
   src.connect(analyser);
+  activeRec.audioCtx = audioCtx;
   const data = new Uint8Array(analyser.frequencyBinCount);
-  const canvas = document.getElementById('wave');
   const ctx = canvas.getContext('2d');
   (function draw(){
-    waveRAF = requestAnimationFrame(draw);
+    if(!activeRec || activeRec.qid !== qid) return;
+    activeRec.raf = requestAnimationFrame(draw);
     analyser.getByteFrequencyData(data);
     ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.fillStyle = '#4FD1A5';
@@ -211,39 +540,77 @@ async function startWave(){
   })();
 }
 
+// --- submit ----------------------------------------------------------------
 async function submit(){
   const fd = new FormData();
-  fd.append('candidateName', state.name);
-  fd.append('consent', 'true');
-  state.form.questions.forEach(q => {
-    if(state.blobs[q.id]) fd.append('answer_'+q.id, state.blobs[q.id], q.id+'.'+extForType(state.blobs[q.id].type));
-  });
+  fd.append('candidateName', state.name.trim());
+  fd.append('respondentEmail', state.email.trim());
+  if(state.consentedAt) fd.append('consent', 'true');
+
+  for(const page of state.pages){
+    for(const q of page.items){
+      if(q.type === 'audio'){
+        const blob = state.blobs[q.id];
+        if(blob) fd.append('answer_'+q.id, blob, q.id+'.'+extForType(blob.type));
+      } else {
+        const v = state.values[q.id];
+        // Every value is JSON-encoded so arrays and numbers survive the trip.
+        if(!isBlank(v)) fd.append('value_'+q.id, JSON.stringify(v));
+      }
+    }
+  }
+
+  const btn = document.getElementById('nextp');
+  if(btn){ btn.disabled = true; btn.textContent = 'Submitting…'; }
+
   try{
-    const r = await fetch(`/api/invite/${state._code}/submit`, { method:'POST', body: fd });
-    const data = await r.json();
-    if(!r.ok) return toast(data.error || 'Submission failed');
+    const r = await fetch(`/api/invite/${state.code}/submit`, { method:'POST', body: fd });
+    const data = await r.json().catch(()=>({}));
+    if(!r.ok){
+      if(btn){ btn.disabled = false; btn.textContent = 'Submit'; }
+      if(data.code === 'INTAKE_CLOSED'){
+        state.form.intake = { open:false, message:data.error };
+        return renderClosed();
+      }
+      // Map the server's per-question errors back onto their fields and jump to
+      // the first page that has one.
+      if(data.fieldErrors && Object.keys(data.fieldErrors).length){
+        state.errors = data.fieldErrors;
+        const idx = state.pages.findIndex(p => p.items.some(q => data.fieldErrors[q.id]));
+        state.page = idx >= 0 ? idx : state.page;
+        renderPage();
+        return toast('Some answers need attention');
+      }
+      if(data.formErrors && Object.keys(data.formErrors).length){
+        renderIntro();
+        const first = Object.values(data.formErrors)[0];
+        return toast(first);
+      }
+      return toast(data.error || 'Submission failed');
+    }
     stage.innerHTML = `
-      <div class="card" style="text-align:center;padding:50px 20px;">
-        <h1 class="page-title">Responses submitted</h1>
-        <p class="subtitle">Thanks, ${escapeHtml(state.name)} — the form owner will review your recordings.</p>
+      <div class="card" style="text-align:center;padding:50px 24px;">
+        <h1 class="page-title">Thanks, ${escapeHtml(state.name.trim())}</h1>
+        <p class="subtitle" style="margin-bottom:0;">Your answers have been sent to the owner of this form.</p>
       </div>`;
-  }catch(e){ toast('Could not reach the server'); }
+  }catch(e){
+    if(btn){ btn.disabled = false; btn.textContent = 'Submit'; }
+    toast('Could not reach the server');
+  }
 }
 
-function currentCode(){ return state._code; }
-
-// Support /apply.html?code=ABC123
+// --- boot ------------------------------------------------------------------
 const params = new URLSearchParams(window.location.search);
 const codeParam = params.get('code');
-state._code = codeParam ? codeParam.toUpperCase() : null;
 if(codeParam){
   (async () => {
+    const code = codeParam.toUpperCase();
     try{
-      const r = await fetch('/api/invite/'+codeParam.toUpperCase());
+      const r = await fetch('/api/invite/'+code);
       const data = await r.json();
-      if(r.ok){ state.form = data; renderName(); return; }
+      if(r.ok){ startForm(data, code); return; }
     }catch(e){}
-    renderCodeEntry(codeParam);
+    renderCodeEntry(code);
   })();
 } else {
   renderCodeEntry();
